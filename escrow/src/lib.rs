@@ -459,6 +459,17 @@ pub struct InvestorAllowlistChanged {
 #[contract]
 pub struct LiquifactEscrow;
 
+/// Validates and converts a workspace-provided invoice identifier string into a Soroban [`Symbol`].
+///
+/// ### Constraints
+/// - **Length**: Must be between 1 and [`MAX_INVOICE_ID_STRING_LEN`] (inclusive).
+/// - **Charset**: Must only contain `[A-Za-z0-9_]`. This is a subset of the valid Symbol charset
+///   enforced to ensure stable, URL-safe slugs in off-chain systems.
+///
+/// ### Security
+/// This function performs a bounds-checked copy into a fixed stack buffer to prevent
+/// uninitialized memory leaks. Only the exact byte-length of the input is converted
+/// to the final symbol, ensuring no trailing null bytes or buffer remnants are preserved.
 fn validate_invoice_id_string(env: &Env, invoice_id: &String) -> Symbol {
     let len = invoice_id.len();
     assert!(

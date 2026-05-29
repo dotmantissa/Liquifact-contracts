@@ -284,6 +284,61 @@ fn test_init_invoice_id_bad_charset_hyphen_panics() {
 }
 
 #[test]
+#[should_panic(expected = "invoice_id must be [A-Za-z0-9_]")]
+fn test_init_invoice_id_non_ascii_multibyte_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let (admin, sme) = (Address::generate(&env), Address::generate(&env));
+    let (t, tr) = free_addresses(&env);
+    // "INV-💩" contains multi-byte UTF-8
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "INV_💩"),
+        &sme,
+        &1000i128,
+        &500i64,
+        &0u64,
+        &t,
+        &None,
+        &tr,
+        &None,
+        &None,
+        &None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "invoice_id must be [A-Za-z0-9_]")]
+fn test_init_invoice_id_embedded_null_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let (admin, sme) = (Address::generate(&env), Address::generate(&env));
+    let (t, tr) = free_addresses(&env);
+
+    // Create a string with an embedded null byte in the middle of valid chars
+    let mut bytes = [b'A'; 10];
+    bytes[5] = 0;
+    let s = soroban_sdk::String::from_bytes(&env, &bytes[..]);
+
+    client.init(
+        &admin,
+        &s,
+        &sme,
+        &1000i128,
+        &500i64,
+        &0u64,
+        &t,
+        &None,
+        &tr,
+        &None,
+        &None,
+        &None,
+    );
+}
+
+#[test]
 fn test_init_stores_registry_some_and_getters() {
     let env = Env::default();
     env.mock_all_auths();
