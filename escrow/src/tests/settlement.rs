@@ -21,8 +21,10 @@ use super::{
     default_init, deploy, deploy_with_id, free_addresses, install_stellar_asset_token, setup,
     MAX_DUST_SWEEP_AMOUNT, TARGET,
 };
+use crate::LiquifactEscrow;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger as _},
+    token::StellarAssetClient,
     Address, Env, String,
 };
 
@@ -36,6 +38,50 @@ fn fund_to_target(client: &super::LiquifactEscrowClient<'_>, env: &Env) -> Addre
     let investor = Address::generate(env);
     client.fund(&investor, &TARGET);
     investor
+}
+
+/// Set up an escrow backed by a real Stellar asset contract (SAC), fund it to
+/// target, and mint `TARGET` tokens into the escrow contract so `withdraw()` can
+/// actually transfer them.  Returns `(client, sme, sac_admin_client)`.
+fn setup_funded_with_token<'a>(
+    env: &'a Env,
+) -> (super::LiquifactEscrowClient<'a>, Address, StellarAssetClient<'a>) {
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(env));
+    let token_id = sac.address();
+    let sac_admin = StellarAssetClient::new(env, &token_id);
+
+    let escrow_id = env.register(LiquifactEscrow, ());
+    let client = super::LiquifactEscrowClient::new(env, &escrow_id);
+    let admin = Address::generate(env);
+    let sme = Address::generate(env);
+    let treasury = Address::generate(env);
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(env, "INV_TOK"),
+        &sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &token_id,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Fund to target (accounting only — no real tokens yet).
+    let investor = Address::generate(env);
+    client.fund(&investor, &TARGET);
+
+    // Mint funded_amount into the escrow contract so withdraw() has tokens to send.
+    sac_admin.mint(&escrow_id, &TARGET);
+
+    (client, sme, sac_admin)
 }
 
 /// Bring an escrow to `status == 2` (settled) and return the investor address.
@@ -55,9 +101,8 @@ fn settle_escrow(client: &super::LiquifactEscrowClient<'_>, env: &Env) -> Addres
 #[test]
 fn withdraw_sets_status_to_three() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
-    default_init(&client, &env, &admin, &sme);
-    fund_to_target(&client, &env);
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
 
     client.withdraw();
 
@@ -75,9 +120,8 @@ fn withdraw_sets_status_to_three() {
 #[test]
 fn withdraw_requires_sme_auth() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
-    default_init(&client, &env, &admin, &sme);
-    fund_to_target(&client, &env);
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
 
     // Passes because test env mocks all auth. The assertion is on the *call*
     // succeeding for the correct signer (sme), not an impostor.
@@ -88,13 +132,12 @@ fn withdraw_requires_sme_auth() {
 }
 
 /// After `withdraw` the funded_amount and funding_target remain intact —
-/// `withdraw` is a state-label change only; it does not zero accounting fields.
+/// `withdraw` transitions state and transfers tokens, but does not zero accounting fields.
 #[test]
 fn withdraw_preserves_accounting_fields() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
-    default_init(&client, &env, &admin, &sme);
-    fund_to_target(&client, &env);
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
 
     client.withdraw();
 
@@ -109,16 +152,12 @@ fn withdraw_preserves_accounting_fields() {
     );
 }
 
-/// `withdraw` emits an `EscrowWithdrawn` event (or equivalent event symbol).
-///
-/// The exact event symbol depends on the contract implementation; adjust the
-/// `symbol_short!` value to match the emitted event name if different.
+/// `withdraw` emits an `SmeWithdrew` event.
 #[test]
 fn withdraw_emits_event() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
-    default_init(&client, &env, &admin, &sme);
-    fund_to_target(&client, &env);
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
 
     client.withdraw();
 
@@ -171,9 +210,8 @@ fn withdraw_on_settled_escrow_panics() {
 #[should_panic]
 fn withdraw_twice_panics() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
-    default_init(&client, &env, &admin, &sme);
-    fund_to_target(&client, &env);
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
 
     client.withdraw(); // first call — succeeds, status → 3
     client.withdraw(); // second call — must panic (status == 3, not 1)
@@ -184,9 +222,8 @@ fn withdraw_twice_panics() {
 #[should_panic]
 fn settle_after_withdraw_panics() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
-    default_init(&client, &env, &admin, &sme);
-    fund_to_target(&client, &env);
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
     client.withdraw(); // status → 3
     client.settle(); // must panic — settle requires status == 1
 }
@@ -196,9 +233,8 @@ fn settle_after_withdraw_panics() {
 #[should_panic]
 fn fund_after_withdraw_panics() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
-    default_init(&client, &env, &admin, &sme);
-    fund_to_target(&client, &env);
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
     client.withdraw(); // status → 3
     let late_investor = Address::generate(&env);
     client.fund(&late_investor, &10_000_000_000_i128); // must panic — fund requires status == 0
@@ -231,9 +267,8 @@ fn withdraw_blocked_by_legal_hold() {
 #[test]
 fn withdraw_succeeds_after_hold_cleared() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
-    default_init(&client, &env, &admin, &sme);
-    fund_to_target(&client, &env);
+    env.mock_all_auths();
+    let (client, _sme, _sac) = setup_funded_with_token(&env);
 
     client.set_legal_hold(&true);
     client.set_legal_hold(&false);

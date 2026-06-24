@@ -289,6 +289,9 @@ pub enum EscrowError {
 
     /// Attempted to accept admin role when no pending admin exists.
     NoPendingAdmin = 163,
+    /// The contract's funding-token balance is less than `funded_amount` at withdraw time.
+    /// Funds must be custodied in this contract before the SME can pull them.
+    InsufficientContractBalance = 164,
 }
 
 #[inline(always)]
@@ -709,6 +712,7 @@ pub struct SmeWithdrew {
     #[topic]
     pub invoice_id: Symbol,
     pub amount: i128,
+    pub recipient: Address,
 }
 
 #[contractevent]
@@ -2406,10 +2410,24 @@ impl LiquifactEscrow {
         escrow
     }
 
-    /// SME pulls funded liquidity (accounting). Blocked when a legal hold is active.
+    /// SME pulls funded liquidity. Transfers `funded_amount` of the bound funding token
+    /// from this contract to `sme_address`, then transitions status to 3 (withdrawn).
+    /// Blocked when a legal hold is active.
+    ///
+    /// # Guard ordering
+    ///
+    /// 1. Legal-hold gate (read-only).
+    /// 2. `sme_address.require_auth()` (via `load_escrow_require_sme`).
+    /// 3. Status == 1 (funded) check.
+    /// 4. Contract balance sufficiency check ([`EscrowError::InsufficientContractBalance`]).
+    /// 5. Status transition to 3, `DistributedPrincipal` update, storage write.
+    /// 6. SEP-41 token transfer with balance-delta verification.
+    /// 7. Event emission.
     ///
     /// # Errors
-    /// Emits typed [`EscrowError`] codes for legal hold, uninitialized escrow, or non-funded state.
+    /// - [`EscrowError::LegalHoldBlocksWithdrawal`] — hold is active.
+    /// - [`EscrowError::WithdrawalNotFunded`] — escrow not in funded state.
+    /// - [`EscrowError::InsufficientContractBalance`] — contract holds less than `funded_amount`.
     pub fn withdraw(env: Env) -> InvoiceEscrow {
         ensure(
             &env,
@@ -2417,20 +2435,56 @@ impl LiquifactEscrow {
             EscrowError::LegalHoldBlocksWithdrawal,
         );
 
-        // env.clone(): env is used again after this call for storage set and publish.
         let mut escrow = Self::load_escrow_require_sme(&env);
 
         ensure(&env, escrow.status == 1, EscrowError::WithdrawalNotFunded);
 
         let amount = escrow.funded_amount;
-        escrow.status = 3;
+        let sme = escrow.sme_address.clone();
 
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::FundingToken)
+            .unwrap_or_else(|| fail(&env, EscrowError::FundingTokenNotSet));
+
+        // Verify the contract holds enough before mutating state.
+        let this = env.current_contract_address();
+        let contract_balance = TokenClient::new(&env, &token_addr).balance(&this);
+        ensure(
+            &env,
+            contract_balance >= amount,
+            EscrowError::InsufficientContractBalance,
+        );
+
+        // State transition and accounting (checks-effects-interactions).
+        escrow.status = 3;
         env.storage().instance().set(&DataKey::Escrow, &escrow);
+
+        let prev_distributed: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DistributedPrincipal)
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::DistributedPrincipal,
+            &prev_distributed.saturating_add(amount),
+        );
+
+        // Token transfer with SEP-41 balance-delta verification.
+        external_calls::transfer_funding_token_with_balance_checks(
+            &env,
+            &token_addr,
+            &this,
+            &sme,
+            amount,
+        );
 
         SmeWithdrew {
             name: symbol_short!("sme_wd"),
             invoice_id: escrow.invoice_id.clone(),
             amount,
+            recipient: sme,
         }
         .publish(&env);
 

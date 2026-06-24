@@ -85,6 +85,43 @@ fn init_open_with_clear_delay(
     (token, treasury)
 }
 
+/// Initialise with a real SAC token, fund to target, and mint `TARGET` tokens
+/// into the escrow contract so `withdraw()` can actually transfer them.
+fn init_funded_with_real_token<'a>(
+    env: &'a Env,
+    admin: &Address,
+    sme: &Address,
+    investor: &Address,
+    id: &str,
+) -> (LiquifactEscrowClient<'a>, Address) {
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(env));
+    let token_id = sac.address();
+    let sac_admin = StellarAssetClient::new(env, &token_id);
+    let treasury = Address::generate(env);
+    let escrow_id = env.register(crate::LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(env, &escrow_id);
+    client.init(
+        admin,
+        &soroban_sdk::String::from_str(env, id),
+        sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &token_id,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+    client.fund(investor, &TARGET);
+    sac_admin.mint(&escrow_id, &TARGET);
+    (client, escrow_id)
+}
+
 /// Initialise, fund to target, return (token, treasury).
 fn init_funded(
     client: &LiquifactEscrowClient<'_>,
@@ -226,9 +263,11 @@ fn withdraw_blocked_under_hold() {
 #[test]
 fn withdraw_passes_when_hold_cleared() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
     let investor = Address::generate(&env);
-    init_funded(&client, &env, &admin, &sme, &investor, "LHW002");
+    let (client, _escrow_id) = init_funded_with_real_token(&env, &admin, &sme, &investor, "LHW002");
     client.set_legal_hold(&true);
     client.clear_legal_hold();
     let escrow = client.withdraw();

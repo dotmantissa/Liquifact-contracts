@@ -727,10 +727,22 @@ fn test_sweep_no_balance() {
 
 #[test]
 fn test_withdraw_happy_path() {
+    use crate::LiquifactEscrow;
+    use soroban_sdk::token::{StellarAssetClient, TokenClient};
+
     let env = Env::default();
     env.mock_all_auths();
-    let (client, admin, sme) = setup(&env);
-    let (token, treasury) = free_addresses(&env);
+
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    let token_id = sac.address();
+    let sac_admin = StellarAssetClient::new(&env, &token_id);
+
+    let escrow_id = env.register(LiquifactEscrow, ());
+    let client = super::LiquifactEscrowClient::new(&env, &escrow_id);
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
     client.init(
         &admin,
         &soroban_sdk::String::from_str(&env, "W"),
@@ -738,7 +750,7 @@ fn test_withdraw_happy_path() {
         &100,
         &10,
         &10,
-        &token,
+        &token_id,
         &None,
         &treasury,
         &None,
@@ -751,6 +763,9 @@ fn test_withdraw_happy_path() {
 
     client.fund(&Address::generate(&env), &100);
     assert_eq!(client.get_escrow().status, 1);
+
+    // Mint funded_amount into the escrow contract so withdraw() can transfer it.
+    sac_admin.mint(&escrow_id, &100);
 
     let updated = client.withdraw();
     assert_eq!(updated.status, 3);

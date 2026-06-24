@@ -118,3 +118,53 @@ pub fn default_init(client: &LiquifactEscrowClient<'_>, env: &Env, admin: &Addre
 
 #[allow(dead_code)]
 pub const TARGET: i128 = 100_000_000_000i128;
+
+/// Create a **new** escrow contract backed by a real Stellar asset contract (SAC),
+/// initialise it with a funded target, fund it to exactly `target`, and mint `target`
+/// tokens into the escrow contract address so that `withdraw()` can actually transfer
+/// them.
+///
+/// Returns `(client, escrow_id, sme, token_client)`.  The caller must have called
+/// `env.mock_all_auths()` (or equivalent) before invoking this helper.
+#[allow(dead_code)]
+pub fn init_and_fund_with_real_token<'a>(
+    env: &'a Env,
+    target: i128,
+    invoice_id: &str,
+) -> (LiquifactEscrowClient<'a>, Address, Address) {
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(env));
+    let token_id = sac.address();
+    let sac_admin = StellarAssetClient::new(env, &token_id);
+
+    let escrow_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(env, &escrow_id);
+    let admin = Address::generate(env);
+    let sme = Address::generate(env);
+    let treasury = Address::generate(env);
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(env, invoice_id),
+        &sme,
+        &target,
+        &800i64,
+        &0u64,
+        &token_id,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    let investor = Address::generate(env);
+    client.fund(&investor, &target);
+
+    // Mint funded_amount into the escrow so withdraw() can actually transfer tokens.
+    sac_admin.mint(&escrow_id, &target);
+
+    (client, escrow_id, sme)
+}
