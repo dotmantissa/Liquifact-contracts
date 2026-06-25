@@ -1687,6 +1687,30 @@ impl LiquifactEscrow {
         env.storage().instance().get(&DataKey::SettledAt)
     }
 
+    /// Returns `true` if the escrow can be settled now, `false` otherwise.
+    ///
+    /// Checks:
+    /// - Status must be 1 (funded)
+    /// - No legal hold active
+    /// - If `maturity > 0`, ledger timestamp must be `>= maturity`
+    ///
+    /// # Panics
+    /// Panics with [`EscrowError::EscrowNotInitialized`] if `init` has not been called.
+    pub fn is_settleable(env: Env) -> bool {
+        if Self::legal_hold_active(&env) {
+            return false;
+        }
+        let escrow = Self::get_escrow(env.clone());
+        if escrow.status != 1 {
+            return false;
+        }
+        if escrow.maturity > 0 {
+            let now = env.ledger().timestamp();
+            return now >= escrow.maturity;
+        }
+        true
+    }
+
     /// Effective yield (bps) for this investor after their **first** deposit; later [`LiquifactEscrow::fund`]
     /// calls add principal at this rate. Defaults to [`InvoiceEscrow::yield_bps`] when unset (legacy positions).
     ///
