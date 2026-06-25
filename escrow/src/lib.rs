@@ -3065,10 +3065,10 @@ impl LiquifactEscrow {
         }
 
         // 6. Allowlist gate (if active).
-        if Self::is_allowlist_active(env.clone()) {
-            if !Self::is_investor_allowlisted(env.clone(), investor.clone()) {
-                return EscrowError::InvestorNotAllowlisted as u32;
-            }
+        if Self::is_allowlist_active(env.clone())
+            && !Self::is_investor_allowlisted(env.clone(), investor.clone())
+        {
+            return EscrowError::InvestorNotAllowlisted as u32;
         }
 
         // 7. Investor contribution must not overflow.
