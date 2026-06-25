@@ -201,7 +201,7 @@ fn escrow_error_discriminants_match_canonical_table() {
         (EscrowError::LegalHoldBlocksBeneficiaryRotation, 160),
         (EscrowError::RotationNotOpen, 161),
         (EscrowError::NewSmeSameAsCurrent, 162),
-        (EscrowError::FundingDeadlinePassed, 164),
+        (EscrowError::FundingDeadlinePassed, 153),
         (EscrowError::NoPendingAdmin, 163),
     ];
     assert_eq!(TABLE.len(), 84);

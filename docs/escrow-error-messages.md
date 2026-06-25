@@ -38,7 +38,7 @@ Codes are grouped by domain so SDKs can map coarse categories without parsing va
 | Cancel / refund | 140–143 | Cancel funding and investor refunds | 140, 143 |
 | Legal-hold clear (two-phase) | 150–152 | Delayed compliance-hold lift workflow | 150, 152 |
 | Beneficiary rotation | 160–162 | Governed SME address rotation | 160, 162 |
-| Admin handover / funding deadline | 163–164 | `accept_admin` and post-deadline funding | 163, 164 |
+| Admin handover / funding deadline | 153, 163–164 | `accept_admin` and post-deadline funding | 153, 163, 164 |
 
 See also [`docs/escrow-legal-hold.md`](escrow-legal-hold.md),
 [`docs/ESCROW_BENEFICIARY_ROTATION.md`](ESCROW_BENEFICIARY_ROTATION.md), and
@@ -127,11 +127,12 @@ See also [`docs/escrow-legal-hold.md`](escrow-legal-hold.md),
 | 150 | `LegalHoldClearRequestMissing` | `set_legal_hold(false)`, `clear_legal_hold` | clearing with non-zero delay but no prior `request_clear_legal_hold` | Call `request_clear_legal_hold` first | typed |
 | 151 | `LegalHoldClearNotReady` | `set_legal_hold(false)`, `clear_legal_hold` | `ledger.timestamp() < clearable_at` | Wait until clear delay elapses | typed |
 | 152 | `LegalHoldClearDelayOverflow` | `request_clear_legal_hold` | `timestamp + delay` overflows `u64` | Reduce delay or timestamp | typed |
+| 153 | `FundingDeadlinePassed` | `init`, `fund`, `fund_with_commitment`, `fund_batch` | `funding_deadline` configured and `ledger.timestamp()` past deadline | Funding window closed; do not retry deposits | typed |
 | 160 | `LegalHoldBlocksBeneficiaryRotation` | `rotate_beneficiary` | legal hold active | Clear hold before rotation | typed |
 | 161 | `RotationNotOpen` | `rotate_beneficiary` | status not `0` (open) or `1` (funded) | Rotation only before settlement | typed |
 | 162 | `NewSmeSameAsCurrent` | `rotate_beneficiary` | `new_sme == current sme_address` | Pass a different beneficiary | typed |
 | 163 | `NoPendingAdmin` | `accept_admin` | no pending admin nomination stored | Call `propose_admin` first | typed |
-| 164 | `FundingDeadlinePassed` | `init`, `fund`, `fund_with_commitment`, `fund_batch` | `funding_deadline` configured and `ledger.timestamp()` past deadline | Funding window closed; do not retry deposits | typed |
+| 164 | `InsufficientContractBalance` | `withdraw` | contract holds less than `funded_amount` | Ensure token custody before withdraw | typed |
 
 ### Legacy panic strings (migration aid)
 
@@ -220,7 +221,7 @@ See also [`docs/escrow-legal-hold.md`](escrow-legal-hold.md),
 | 161 | `Beneficiary rotation not permitted in current escrow state` |
 | 162 | `New SME address must differ from current beneficiary` |
 | 163 | `No pending admin` |
-| 164 | `Funding deadline has passed` |
+| 153 | `Funding deadline has passed` |
 
 ## Client Guidance
 
@@ -240,7 +241,7 @@ Recommended SDK category mappings:
 | 90–92 | Migration failure |
 | 100–111 | Funding failure |
 | 163 | Admin handover not pending |
-| 164 | Funding deadline expired |
+| 153 | Funding deadline expired |
 | 120–129 | Settlement, withdrawal, or investor payout failure |
 | 140–143 | Cancellation or refund failure |
 | 150–152 | Legal-hold clear workflow failure |
