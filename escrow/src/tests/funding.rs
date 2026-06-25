@@ -3736,3 +3736,62 @@ fn test_preview_fund_inactive_allowlist_then_fund() {
     client.fund(&investor, &(TARGET / 2));
     assert_eq!(client.get_contribution(&investor), TARGET / 2);
 }
+
+#[test]
+fn test_preview_fund_funded_amount_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let contract_id = client.address.clone();
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let (tok, tre) = free_addresses(&env);
+
+    client.init(
+        &admin,
+        &String::from_str(&env, "OVF005"),
+        &sme,
+        &1_000i128,
+        &800i64,
+        &0u64,
+        &tok,
+        &None,
+        &tre,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Push funded_amount near i128::MAX to trigger overflow.
+    env.as_contract(&contract_id, || {
+        let mut escrow = LiquifactEscrow::get_escrow(env.clone());
+        escrow.funded_amount = i128::MAX - 10;
+        escrow.status = 0;
+        env.storage().instance().set(&DataKey::Escrow, &escrow);
+    });
+
+    let code_overflow = client.preview_fund(&investor, &11i128);
+    assert_eq!(
+        code_overflow,
+        EscrowError::FundedAmountOverflow as u32,
+        "expected FundedAmountOverflow when funded_amount + amount overflows",
+    );
+
+    // Smaller amount that does not overflow must still pass.
+    let code_ok = client.preview_fund(&investor, &5i128);
+    assert_eq!(code_ok, 0, "amount within range must return 0");
+
+    // Confirm fund() also panics with FundedAmountOverflow.
+    let overflowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.fund(&investor, &11i128);
+    }));
+    assert!(
+        overflowed.is_err(),
+        "fund() must panic when funded_amount would overflow",
+    );
+}

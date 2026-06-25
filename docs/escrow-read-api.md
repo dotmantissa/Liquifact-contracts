@@ -242,6 +242,7 @@ A `#[contracttype]` enum representing the optional `FundingCloseSnapshot`:
 | 8 | Investor contribution does not overflow | `InvestorContributionOverflow` (105) |
 | 9 | Per-investor cap not exceeded (if configured) | `InvestorContributionExceedsCap` (106) |
 | 10 | Unique-investor cap not reached (if configured, new investors only) | `UniqueInvestorCapReached` (107) |
+| 11 | Total funded-amount does not overflow | `FundedAmountOverflow` (110) |
 
 ### Advisory
 

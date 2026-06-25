@@ -3026,6 +3026,15 @@ impl LiquifactEscrow {
         // Guard order matches fund_impl (minus require_auth, which is skipped):
         //
         // 1. Amount must be positive.
+        // 2. Minimum contribution floor.
+        // 3. Legal hold blocks funding.
+        // 4. Escrow must be in open status.
+        // 5. Funding deadline must not have passed.
+        // 6. Allowlist gate (if active).
+        // 7. Investor contribution must not overflow.
+        // 8. Per-investor cap (if configured).
+        // 9. Unique-investor cap (if configured and investor is new).
+        // 10. Total funded-amount overflow.
         if amount <= 0 {
             return EscrowError::FundingAmountNotPositive as u32;
         }
@@ -3105,6 +3114,11 @@ impl LiquifactEscrow {
                     return EscrowError::UniqueInvestorCapReached as u32;
                 }
             }
+        }
+
+        // 10. Total funded-amount overflow.
+        if escrow.funded_amount.checked_add(amount).is_none() {
+            return EscrowError::FundedAmountOverflow as u32;
         }
 
         // All guards passed — deposit would succeed.
