@@ -423,7 +423,7 @@ expose that entrypoint, so operators should use redeploy for new WASM.
 - Never use a single-signer hot wallet as `admin` in production.
 - Admin rotation is two-step: `propose_admin` requires the current admin's
   authorization, and `accept_admin` requires the proposed successor's
-  authorization. Test both steps on Testnet before executing on Mainnet.
+  authorization. Test both steps on Testnet before executing on Mainnet. (See `test_admin_handover_lifecycle` in `escrow/src/tests/admin.rs` for an end-to-end example).
 
 ### `migrate()` is not a no-op
 
