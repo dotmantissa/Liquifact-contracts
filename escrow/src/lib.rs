@@ -366,6 +366,10 @@ pub enum EscrowError {
     /// The contract's funding-token balance is less than `funded_amount` at withdraw time.
     /// Funds must be custodied in this contract before the SME can pull them.
     InsufficientContractBalance = 164,
+
+    /// [`LiquifactEscrow::claim_investor_payout`] computed a payout of zero even though the investor
+    /// has a positive contribution. This can happen when floor integer division rounds to zero.
+    PayoutZero = 165,
 }
 
 #[inline(always)]
@@ -2201,11 +2205,7 @@ impl LiquifactEscrow {
         let n = entries.len();
 
         ensure(&env, n > 0, EscrowError::FundingBatchEmpty);
-        ensure(
-            &env,
-            n <= MAX_FUND_BATCH,
-            EscrowError::FundingBatchTooLarge,
-        );
+        ensure(&env, n <= MAX_FUND_BATCH, EscrowError::FundingBatchTooLarge);
 
         let mut escrow = Self::get_escrow(env.clone());
 
@@ -2596,13 +2596,24 @@ impl LiquifactEscrow {
         escrow
     }
 
-    /// Investor records a payout claim after settlement. Idempotent marker per investor.
+    /// Investor records a payout claim after settlement and receives the gross payout on-chain.
     ///
     /// # Idempotency
     ///
     /// A second call for the same investor is a silent no-op: the `InvestorClaimed` marker is
-    /// written **before** `InvestorPayoutClaimed` is emitted, so re-entrant or replayed calls
-    /// return early without re-emitting the event.
+    /// written **before** the token transfer, so re-entrant or replayed calls return early
+    /// without a second transfer.
+    ///
+    /// # Payout flow
+    ///
+    /// 1. Compute the gross pro-rata payout via [`LiquifactEscrow::compute_investor_payout`].
+    /// 2. Guard against zero-payout edge cases (floor division rounding).
+    /// 3. Mark the investor as claimed (effect).
+    /// 4. Transfer the payout from this contract to the investor (interaction).
+    /// 5. Emit `InvestorPayoutClaimed`.
+    ///
+    /// If the transfer fails (e.g. insufficient contract balance), the host rolls back all
+    /// storage writes including the claimed marker, so the investor may retry.
     ///
     /// # Guard ordering (ADR-002)
     ///
@@ -2613,11 +2624,13 @@ impl LiquifactEscrow {
     /// 4. Settled-status gate (escrow read).
     /// 5. `not_before` ledger-time gate (see `docs/escrow-ledger-time.md`).
     /// 6. Idempotent early-return on `InvestorClaimed`.
-    /// 7. Storage write + event emit.
+    /// 7. On-chain payout computation via [`LiquifactEscrow::compute_investor_payout`].
+    /// 8. Zero-payout guard (floor-division edge case).
+    /// 9. Storage write + token transfer + event emit.
     ///
     /// # Errors
     /// Emits typed [`EscrowError`] codes for legal hold, missing contribution, unsettled escrow,
-    /// or an unexpired commitment lock.
+    /// an unexpired commitment lock, or a zero computed payout.
     pub fn claim_investor_payout(env: Env, investor: Address) {
         ensure(
             &env,
@@ -2654,8 +2667,23 @@ impl LiquifactEscrow {
             return;
         }
 
-        // Mark before emit — prevents re-emission on any re-entrant path.
+        // Compute on-chain gross payout via pro-rata math.
+        let payout = Self::compute_investor_payout(env.clone(), investor.clone());
+        ensure(&env, payout > 0, EscrowError::PayoutZero);
+
+        // Mark before transfer — prevents double-pay on any re-entrant path.
         Self::set_persistent_investor_claimed(&env, investor.clone(), true);
+
+        // Transfer gross payout from this contract to the investor.
+        let this = env.current_contract_address();
+        let token_addr = Self::funding_token_or_fail(&env);
+        external_calls::transfer_funding_token_with_balance_checks(
+            &env,
+            &token_addr,
+            &this,
+            &investor,
+            payout,
+        );
 
         InvestorPayoutClaimed {
             name: symbol_short!("inv_claim"),

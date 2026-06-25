@@ -19,7 +19,7 @@
 #[cfg(test)]
 use super::{
     default_init, deploy, deploy_with_id, free_addresses, install_stellar_asset_token, setup,
-    MAX_DUST_SWEEP_AMOUNT, TARGET,
+    StellarTestToken, MAX_DUST_SWEEP_AMOUNT, TARGET,
 };
 use crate::LiquifactEscrow;
 use soroban_sdk::{
@@ -45,7 +45,11 @@ fn fund_to_target(client: &super::LiquifactEscrowClient<'_>, env: &Env) -> Addre
 /// actually transfer them.  Returns `(client, sme, sac_admin_client)`.
 fn setup_funded_with_token<'a>(
     env: &'a Env,
-) -> (super::LiquifactEscrowClient<'a>, Address, StellarAssetClient<'a>) {
+) -> (
+    super::LiquifactEscrowClient<'a>,
+    Address,
+    StellarAssetClient<'a>,
+) {
     let sac = env.register_stellar_asset_contract_v2(Address::generate(env));
     let token_id = sac.address();
     let sac_admin = StellarAssetClient::new(env, &token_id);
@@ -89,6 +93,52 @@ fn settle_escrow(client: &super::LiquifactEscrowClient<'_>, env: &Env) -> Addres
     let investor = fund_to_target(client, env);
     client.settle();
     investor
+}
+
+/// Setup a claim-payout test environment with a real Stellar asset token.
+/// Returns `(client, token, contract_id, treasury)`.
+fn setup_claim_env<'a>(
+    env: &'a Env,
+    invoice_id: &str,
+    target: i128,
+    yield_bps: i64,
+) -> (
+    super::LiquifactEscrowClient<'a>,
+    super::StellarTestToken<'a>,
+    Address,
+    Address,
+) {
+    env.mock_all_auths();
+    let token = super::install_stellar_asset_token(env);
+    let (contract_id, client) = super::deploy_with_id(env);
+    let admin = Address::generate(env);
+    let sme = Address::generate(env);
+    let treasury = Address::generate(env);
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(env, invoice_id),
+        &sme,
+        &target,
+        &yield_bps,
+        &0u64,
+        &token.id,
+        &None,
+        &treasury,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+    (client, token, contract_id, treasury)
+}
+
+/// Compute the gross pro-rata payout expected by `compute_investor_payout`.
+fn expected_payout(contribution: i128, total_principal: i128, yield_bps: i64) -> i128 {
+    contribution * (total_principal + total_principal * yield_bps as i128 / 10_000)
+        / total_principal
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -284,36 +334,26 @@ fn withdraw_succeeds_after_hold_cleared() {
 #[test]
 fn test_claim_investor_twice_is_idempotent() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
+    let (client, token, contract_id, _treasury) = setup_claim_env(&env, "CL001", 1_000i128, 400i64);
     let investor = Address::generate(&env);
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "CL001"),
-        &sme,
-        &1_000i128,
-        &400i64,
-        &0u64,
-        &Address::generate(&env),
-        &None,
-        &Address::generate(&env),
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
     client.fund(&investor, &1_000i128);
+    token.stellar.mint(&contract_id, &1_040i128);
     client.settle();
 
-    // First claim - should succeed and set the claimed marker
-    client.claim_investor_payout(&investor);
-
-    assert!(client.is_investor_claimed(&investor));
-
-    // Second claim - should be idempotent (no-op, does not panic)
+    // First claim — transfers 1040 tokens and sets the marker.
+    let balance_before = token.token.balance(&investor);
     client.claim_investor_payout(&investor);
     assert!(client.is_investor_claimed(&investor));
+    assert_eq!(token.token.balance(&investor) - balance_before, 1_040i128,);
+
+    // Second claim — idempotent (no-op, no second transfer).
+    client.claim_investor_payout(&investor);
+    assert!(client.is_investor_claimed(&investor));
+    assert_eq!(
+        token.token.balance(&investor) - balance_before,
+        1_040i128,
+        "second claim must not transfer again",
+    );
 }
 
 #[test]
@@ -350,36 +390,23 @@ fn test_claim_by_non_investor_panics() {
 #[test]
 fn test_clashing_investors_have_independent_claims() {
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
+    let (client, token, contract_id, _treasury) =
+        setup_claim_env(&env, "CLASH01", 2_000i128, 400i64);
     let inv_a = Address::generate(&env);
     let inv_b = Address::generate(&env);
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "CLASH01"),
-        &sme,
-        &2_000i128,
-        &400i64,
-        &0u64,
-        &Address::generate(&env),
-        &None,
-        &Address::generate(&env),
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
     client.fund(&inv_a, &1_000i128);
     client.fund(&inv_b, &1_000i128);
+    token.stellar.mint(&contract_id, &2_080i128);
     client.settle();
 
     client.claim_investor_payout(&inv_a);
     assert!(client.is_investor_claimed(&inv_a));
     assert!(!client.is_investor_claimed(&inv_b));
+    assert_eq!(token.token.balance(&inv_a), 1_040i128);
 
     client.claim_investor_payout(&inv_b);
     assert!(client.is_investor_claimed(&inv_b));
+    assert_eq!(token.token.balance(&inv_b), 1_040i128);
 }
 
 /// `set_legal_hold` must be admin-only; a non-admin cannot place a hold.
@@ -460,68 +487,31 @@ fn test_claim_blocked_until_commitment_ledger_time() {
 #[test]
 fn test_claim_succeeds_after_commitment_and_settle() {
     let env = Env::default();
-    env.mock_all_auths();
-    let client = deploy(&env);
-    let admin = Address::generate(&env);
-    let sme = Address::generate(&env);
+    let (client, token, contract_id, _treasury) =
+        setup_claim_env(&env, "LOCK002", 1_000i128, 400i64);
     let inv = Address::generate(&env);
-    let (tok, treasury) = free_addresses(&env);
-    client.init(
-        &admin,
-        &String::from_str(&env, "LOCK002"),
-        &sme,
-        &1_000i128,
-        &400i64,
-        &0u64,
-        &tok,
-        &None,
-        &treasury,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
     client.fund_with_commitment(&inv, &1_000i128, &100u64);
+    token.stellar.mint(&contract_id, &1_040i128);
     client.settle();
     env.ledger().set_timestamp(150);
+    let balance_before = token.token.balance(&inv);
     client.claim_investor_payout(&inv);
     assert!(client.is_investor_claimed(&inv));
+    assert_eq!(token.token.balance(&inv) - balance_before, 1_040i128);
 }
 
 #[test]
 fn test_claim_gating_exact_timestamp() {
     let env = Env::default();
-    env.mock_all_auths();
-    let client = deploy(&env);
-    let admin = Address::generate(&env);
-    let sme = Address::generate(&env);
+    let (client, token, contract_id, _treasury) =
+        setup_claim_env(&env, "LOCK003", 1_000i128, 400i64);
     let inv = Address::generate(&env);
-    let (tok, treasury) = free_addresses(&env);
 
     env.ledger().set_timestamp(1000);
 
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "LOCK003"),
-        &sme,
-        &1_000i128,
-        &400i64,
-        &0u64,
-        &tok,
-        &None,
-        &treasury,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
-
     let lock_duration = 500u64;
     client.fund_with_commitment(&inv, &1_000i128, &lock_duration);
+    token.stellar.mint(&contract_id, &1_040i128);
     client.settle();
 
     let expiry = 1000 + lock_duration;
@@ -535,43 +525,25 @@ fn test_claim_gating_exact_timestamp() {
 
     // Exact expiry
     env.ledger().set_timestamp(expiry);
+    let balance_before = token.token.balance(&inv);
     client.claim_investor_payout(&inv);
     assert!(client.is_investor_claimed(&inv));
+    assert_eq!(token.token.balance(&inv) - balance_before, 1_040i128);
 }
 
 #[test]
 fn test_claim_gating_with_multiple_investors() {
     let env = Env::default();
-    env.mock_all_auths();
-    let client = deploy(&env);
-    let admin = Address::generate(&env);
-    let sme = Address::generate(&env);
+    let (client, token, contract_id, _treasury) =
+        setup_claim_env(&env, "LOCK004", 2_000i128, 400i64);
     let inv1 = Address::generate(&env);
     let inv2 = Address::generate(&env);
-    let (tok, treasury) = free_addresses(&env);
 
     env.ledger().set_timestamp(1000);
 
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "LOCK004"),
-        &sme,
-        &2_000i128,
-        &400i64,
-        &0u64,
-        &tok,
-        &None,
-        &treasury,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
-
     client.fund_with_commitment(&inv1, &1_000i128, &100u64); // Expiry 1100
     client.fund_with_commitment(&inv2, &1_000i128, &200u64); // Expiry 1200
+    token.stellar.mint(&contract_id, &2_080i128);
     client.settle();
 
     env.ledger().set_timestamp(1150);
@@ -579,6 +551,7 @@ fn test_claim_gating_with_multiple_investors() {
     // inv1 can claim
     client.claim_investor_payout(&inv1);
     assert!(client.is_investor_claimed(&inv1));
+    assert_eq!(token.token.balance(&inv1), 1_040i128);
 
     // inv2 still blocked
     let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -589,6 +562,7 @@ fn test_claim_gating_with_multiple_investors() {
     env.ledger().set_timestamp(1200);
     client.claim_investor_payout(&inv2);
     assert!(client.is_investor_claimed(&inv2));
+    assert_eq!(token.token.balance(&inv2), 1_040i128);
 }
 
 /// Cost baseline: settle after funding.
@@ -1372,62 +1346,35 @@ fn test_is_investor_claimed_returns_false_for_unfunded_address() {
 fn test_claim_marker_persists_after_claim() {
     // After a successful claim the flag must remain true across repeated reads.
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
+    let (client, token, contract_id, _treasury) =
+        setup_claim_env(&env, "GIC003", 1_000i128, 400i64);
     let investor = Address::generate(&env);
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "GIC003"),
-        &sme,
-        &1_000i128,
-        &400i64,
-        &0u64,
-        &Address::generate(&env),
-        &None,
-        &Address::generate(&env),
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
     client.fund(&investor, &1_000i128);
+    token.stellar.mint(&contract_id, &1_040i128);
     client.settle();
     client.claim_investor_payout(&investor);
     assert!(client.is_investor_claimed(&investor));
     assert!(client.is_investor_claimed(&investor)); // second read: still persisted
+    assert_eq!(token.token.balance(&investor), 1_040i128);
 }
 
 #[test]
 fn test_claim_marker_isolated_per_investor() {
     // Claiming for investor_a must not set the flag for investor_b (no key crosstalk).
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
+    let (client, token, contract_id, _treasury) =
+        setup_claim_env(&env, "GIC004", 2_000i128, 400i64);
     let investor_a = Address::generate(&env);
     let investor_b = Address::generate(&env);
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "GIC004"),
-        &sme,
-        &2_000i128,
-        &400i64,
-        &0u64,
-        &Address::generate(&env),
-        &None,
-        &Address::generate(&env),
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
     client.fund(&investor_a, &1_000i128);
     client.fund(&investor_b, &1_000i128);
+    token.stellar.mint(&contract_id, &2_080i128);
     client.settle();
     client.claim_investor_payout(&investor_a);
     assert!(client.is_investor_claimed(&investor_a));
     assert!(!client.is_investor_claimed(&investor_b)); // b unaffected by a's claim
+    assert_eq!(token.token.balance(&investor_a), 1_040i128);
+    assert_eq!(token.token.balance(&investor_b), 0); // b not claimed yet
 }
 
 #[test]
@@ -1435,38 +1382,28 @@ fn test_claim_marker_all_investors_independent() {
     // Three investors with independent claim keys; partial claiming must not
     // corrupt unclaimed investors' flags.
     let env = Env::default();
-    let (client, admin, sme) = setup(&env);
+    let (client, token, contract_id, _treasury) =
+        setup_claim_env(&env, "GIC005", 3_000i128, 400i64);
     let inv_a = Address::generate(&env);
     let inv_b = Address::generate(&env);
     let inv_c = Address::generate(&env);
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "GIC005"),
-        &sme,
-        &3_000i128,
-        &400i64,
-        &0u64,
-        &Address::generate(&env),
-        &None,
-        &Address::generate(&env),
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
     client.fund(&inv_a, &1_000i128);
     client.fund(&inv_b, &1_000i128);
     client.fund(&inv_c, &1_000i128);
+    token.stellar.mint(&contract_id, &3_120i128);
     client.settle();
     client.claim_investor_payout(&inv_a);
     client.claim_investor_payout(&inv_c);
     assert!(client.is_investor_claimed(&inv_a));
     assert!(!client.is_investor_claimed(&inv_b)); // b still unclaimed
     assert!(client.is_investor_claimed(&inv_c));
+    assert_eq!(token.token.balance(&inv_a), 1_040i128);
+    assert_eq!(token.token.balance(&inv_b), 0);
+    assert_eq!(token.token.balance(&inv_c), 1_040i128);
     client.claim_investor_payout(&inv_b);
     assert!(client.is_investor_claimed(&inv_b));
+    assert_eq!(token.token.balance(&inv_b), 1_040i128);
+    // Total distributed: 3120 = 3 * 1040 ✓
 }
 
 #[test]
