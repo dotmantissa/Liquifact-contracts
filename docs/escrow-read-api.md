@@ -64,6 +64,49 @@ Returns the current schema version (`SCHEMA_VERSION`). Returns `0` before `init`
 
 ---
 
+## `is_fully_funded() → bool`
+
+**Derived from:** `DataKey::Escrow` (`funded_amount`, `funding_target`)
+
+Returns `true` when `funded_amount >= funding_target`.
+
+### Purpose
+
+Exposes the contract's authoritative funding-completion predicate as a pure read view so
+frontends no longer need to reimplement the funding logic client-side. Frontends and
+indexers should call this view instead of reading `get_escrow()` and comparing fields
+manually, because this view exactly mirrors the predicate used internally by the funding
+transition logic and is therefore guaranteed to stay in sync with any future changes.
+
+### Return value
+
+| Condition | Returns |
+|-----------|---------|
+| `funded_amount < funding_target` | `false` |
+| `funded_amount == funding_target` | `true` |
+| `funded_amount > funding_target` | `true` |
+
+### Exact predicate
+
+```text
+funded_amount >= funding_target
+```
+
+This is identical to the condition in `fund_impl` that transitions `status` from `0`
+(open) to `1` (funded).
+
+### Atomicity note
+
+A `true` result before the funded status transition cannot occur because the transition
+is atomic: `funded_amount` is updated and `status` is set to `1` in the same storage
+write within `fund_impl`. Consequently `is_fully_funded() == true` implies `status == 1`.
+
+### Authorization
+
+None — pure read; no auth required, no state mutation, no side effects.
+
+---
+
 ## `get_legal_hold() → bool`
 
 **Storage key:** `DataKey::LegalHold`

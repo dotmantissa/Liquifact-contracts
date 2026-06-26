@@ -1416,6 +1416,14 @@ impl LiquifactEscrow {
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
 
+    /// Returns true when funded_amount >= funding_target.
+    /// Mirrors the exact funding completion predicate used
+    /// by the funding transition logic.
+    pub fn is_fully_funded(env: Env) -> bool {
+        let escrow = Self::get_escrow(env);
+        escrow.funded_amount >= escrow.funding_target
+    }
+
     /// Get the optional funding deadline (ledger timestamp), returns None if not set.
     pub fn get_funding_deadline(env: Env) -> Option<u64> {
         env.storage().instance().get(&DataKey::FundingDeadline)
