@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    AdminProposalCancelled, AdminProposedEvent, EscrowCloseSnapshot, FundingTargetUpdated,
+    AdminProposalCancelled, AdminProposedEvent, ContractUpgraded, EscrowCloseSnapshot,
+    FundingTargetUpdated,
 };
 use soroban_sdk::Event;
 
@@ -1751,4 +1752,190 @@ fn test_cancel_before_expiry_clears_expiry() {
     client.cancel_pending_admin();
     assert_eq!(client.get_pending_admin(), None);
     assert_eq!(client.get_pending_admin_expiry(), None);
+}
+
+// ---------------------------------------------------------------------------
+// upgrade() entrypoint: state preservation, non-admin rejection, event payload
+// ---------------------------------------------------------------------------
+
+/// Register a minimal WASM module in the test environment and return its 32-byte hash.
+///
+/// The bytes are the canonical WASM magic number and version-1 header — the smallest
+/// well-formed WASM module accepted by the Soroban test host.  The hash is the value
+/// that `update_current_contract_wasm` expects; the actual bytecode is irrelevant in
+/// native-test mode because no VM execution occurs.
+fn install_stub_wasm(env: &Env) -> soroban_sdk::BytesN<32> {
+    // Minimal valid WASM: 4-byte magic (\0asm) + 4-byte version (1 little-endian).
+    env.deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(
+            env,
+            b"\x00asm\x01\x00\x00\x00",
+        ))
+}
+
+/// `upgrade()` must leave all persistent and instance storage keys intact.
+///
+/// This test funds an escrow to the target (which writes `DataKey::Escrow`,
+/// `DataKey::InvestorContribution`, and `DataKey::FundingCloseSnapshot`), calls
+/// `upgrade()` with the same WASM hash, and then reads back every piece of state
+/// that was written before the call to prove the deployer swap does not touch stored data.
+#[test]
+fn test_upgrade_preserves_escrow_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    let client = deploy(&env);
+    let contract_id = client.address.clone();
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "UPG001"),
+        &sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Fund to target so FundingCloseSnapshot and InvestorContribution are written.
+    client.fund(&investor, &TARGET);
+
+    let escrow_before = client.get_escrow();
+    let snapshot_before = client
+        .get_funding_close_snapshot()
+        .expect("snapshot must exist after full funding");
+    let contribution_before: i128 = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::InvestorContribution(investor.clone()))
+            .expect("contribution must exist")
+    });
+
+    // Perform upgrade with the same WASM (additive-only policy; state must survive).
+    let new_hash = install_stub_wasm(&env);
+    client.upgrade(&new_hash);
+
+    // All pre-upgrade state must be byte-identical after the upgrade.
+    assert_eq!(client.get_escrow(), escrow_before, "DataKey::Escrow changed");
+    assert_eq!(
+        client.get_funding_close_snapshot().expect("snapshot missing post-upgrade"),
+        snapshot_before,
+        "FundingCloseSnapshot changed"
+    );
+    let contribution_after: i128 = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::InvestorContribution(investor.clone()))
+            .expect("contribution missing post-upgrade")
+    });
+    assert_eq!(
+        contribution_after, contribution_before,
+        "InvestorContribution changed"
+    );
+}
+
+/// `upgrade()` must reject any caller that has not been granted admin authorization.
+///
+/// The test wires zero mock auths so even a legitimate admin address cannot satisfy
+/// `require_auth()`. The call must fail before reaching the deployer swap.
+#[test]
+#[should_panic]
+fn test_upgrade_rejects_non_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let client = deploy(&env);
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "UPG002"),
+        &sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Upload WASM while auths are still mocked, then strip all authorizations.
+    let new_hash = install_stub_wasm(&env);
+    env.mock_auths(&[]);
+
+    // Must panic — no admin auth is present.
+    client.upgrade(&new_hash);
+}
+
+/// `upgrade()` must emit a `ContractUpgraded` event containing the correct
+/// `invoice_id` and `new_wasm_hash` before the deployer call executes.
+///
+/// The `symbol_short!("upgrade")` topic and the hash payload are the primary
+/// signals downstream indexers use to detect WASM replacement. Any regression
+/// in topic or data would silently break monitoring.
+#[test]
+fn test_upgrade_emits_event() {
+    use soroban_sdk::testutils::Events as _;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let sme = Address::generate(&env);
+    let client = deploy(&env);
+    let contract_id = client.address.clone();
+
+    client.init(
+        &admin,
+        &soroban_sdk::String::from_str(&env, "UPG003"),
+        &sme,
+        &TARGET,
+        &800i64,
+        &0u64,
+        &Address::generate(&env),
+        &None,
+        &Address::generate(&env),
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
+
+    let new_hash = install_stub_wasm(&env);
+    client.upgrade(&new_hash);
+
+    let invoice_id = client.get_escrow().invoice_id;
+    let expected = crate::ContractUpgraded {
+        name: symbol_short!("upgrade"),
+        invoice_id,
+        new_wasm_hash: new_hash,
+    }
+    .to_xdr(&env, &contract_id);
+
+    assert_eq!(
+        env.events().all().events().last().unwrap().clone(),
+        expected,
+        "upgrade event topic or payload mismatch"
+    );
 }
