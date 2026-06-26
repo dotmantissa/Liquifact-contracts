@@ -1484,11 +1484,7 @@ impl LiquifactEscrow {
     /// missing initialized addresses, empty balances, liability floor violation, and token
     /// transfer invariant failures.
     pub fn sweep_terminal_dust(env: Env, amount: i128) -> i128 {
-        ensure(
-            &env,
-            !Self::legal_hold_active(&env),
-            EscrowError::LegalHoldBlocksTreasuryDustSweep,
-        );
+        Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksTreasuryDustSweep);
         ensure(&env, amount > 0, EscrowError::SweepAmountNotPositive);
         ensure(
             &env,
@@ -1500,7 +1496,7 @@ impl LiquifactEscrow {
         let escrow = Self::get_escrow(env.clone());
         ensure(
             &env,
-            escrow.status == 2 || escrow.status == 3 || escrow.status == 4,
+            Self::is_terminal_status(escrow.status),
             EscrowError::DustSweepNotTerminal,
         );
 
@@ -1669,11 +1665,7 @@ impl LiquifactEscrow {
     /// | `new_sme_address == current SME` | [`EscrowError::NewSmeSameAsCurrent`] |
     pub fn rotate_beneficiary(env: Env, new_sme_address: Address) -> InvoiceEscrow {
         // Legal-hold gate (read-only).
-        ensure(
-            &env,
-            !Self::legal_hold_active(&env),
-            EscrowError::LegalHoldBlocksBeneficiaryRotation,
-        );
+        Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksBeneficiaryRotation);
 
         let mut escrow = Self::get_escrow(env.clone());
 
@@ -1736,6 +1728,27 @@ impl LiquifactEscrow {
             .unwrap_or_else(|| fail(env, EscrowError::EscrowNotInitialized));
         escrow.sme_address.require_auth();
         escrow
+    }
+
+    /// Guard that the escrow is not under a legal hold.
+    ///
+    /// # Panics
+    /// Panics with `err` if a legal hold is active.
+    fn guard_not_legal_hold(env: &Env, err: EscrowError) {
+        ensure(env, !Self::legal_hold_active(env), err);
+    }
+
+    /// Returns `true` when `status` is a terminal state (settled, withdrawn, or cancelled).
+    fn is_terminal_status(status: u32) -> bool {
+        status == 2 || status == 3 || status == 4
+    }
+
+    /// Guard that `escrow_status` equals `expected`.
+    ///
+    /// # Panics
+    /// Panics with `err` if the statuses do not match.
+    fn guard_status_eq(env: &Env, escrow_status: u32, expected: u32, err: EscrowError) {
+        ensure(env, escrow_status == expected, err);
     }
 
     pub fn get_version(env: Env) -> u32 {
@@ -2592,7 +2605,7 @@ impl LiquifactEscrow {
         let mut escrow = Self::load_escrow_require_admin(&env);
 
         ensure(&env, new_target > 0, EscrowError::TargetNotPositive);
-        ensure(&env, escrow.status == 0, EscrowError::TargetUpdateNotOpen);
+        Self::guard_status_eq(&env, escrow.status, 0, EscrowError::TargetUpdateNotOpen);
         ensure(
             &env,
             new_target >= escrow.funded_amount,
@@ -2691,7 +2704,7 @@ impl LiquifactEscrow {
     pub fn lower_max_unique_investors(env: Env, new_cap: u32) -> u32 {
         let escrow = Self::load_escrow_require_admin(&env);
 
-        ensure(&env, escrow.status == 0, EscrowError::CapLowerNotOpen);
+        Self::guard_status_eq(&env, escrow.status, 0, EscrowError::CapLowerNotOpen);
 
         let old_cap: Option<u32> = env
             .storage()
@@ -2925,16 +2938,11 @@ impl LiquifactEscrow {
         }
 
         let mut escrow = Self::get_escrow(env.clone());
-        ensure(
-            &env,
-            !Self::legal_hold_active(&env),
-            EscrowError::LegalHoldBlocksFunding,
-        );
-        ensure(
-            &env,
-            escrow.status == 0,
-            EscrowError::EscrowNotOpenForFunding,
-        );
+        // Legal hold check is intentionally after the escrow read: the escrow is needed for
+        // status and yield_bps regardless, and hoisting the hold check before the escrow read
+        // would not reduce storage operations (both keys are always read on this path).
+        Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksFunding);
+        Self::guard_status_eq(&env, escrow.status, 0, EscrowError::EscrowNotOpenForFunding);
 
         // Check funding deadline
         if let Some(deadline) = env.storage().instance().get(&DataKey::FundingDeadline) {
@@ -3187,16 +3195,12 @@ impl LiquifactEscrow {
     }
 
     pub fn settle(env: Env) -> InvoiceEscrow {
-        ensure(
-            &env,
-            !Self::legal_hold_active(&env),
-            EscrowError::LegalHoldBlocksSettlement,
-        );
+        Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksSettlement);
 
         // env.clone(): env is used again after this call for ledger timestamp, storage set, and publish.
         let mut escrow = Self::load_escrow_require_sme(&env);
 
-        ensure(&env, escrow.status == 1, EscrowError::SettlementNotFunded);
+        Self::guard_status_eq(&env, escrow.status, 1, EscrowError::SettlementNotFunded);
 
         let now = env.ledger().timestamp();
         if escrow.maturity > 0 {
@@ -3293,15 +3297,11 @@ impl LiquifactEscrow {
     /// - [`EscrowError::WithdrawalNotFunded`] — escrow not in funded state.
     /// - [`EscrowError::InsufficientContractBalance`] — contract holds less than `funded_amount`.
     pub fn withdraw(env: Env) -> InvoiceEscrow {
-        ensure(
-            &env,
-            !Self::legal_hold_active(&env),
-            EscrowError::LegalHoldBlocksWithdrawal,
-        );
+        Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksWithdrawal);
 
         let mut escrow = Self::load_escrow_require_sme(&env);
 
-        ensure(&env, escrow.status == 1, EscrowError::WithdrawalNotFunded);
+        Self::guard_status_eq(&env, escrow.status, 1, EscrowError::WithdrawalNotFunded);
 
         let amount = escrow.funded_amount;
         let sme = escrow.sme_address.clone();
@@ -3391,11 +3391,7 @@ impl LiquifactEscrow {
     /// Emits typed [`EscrowError`] codes for legal hold, missing contribution, unsettled escrow,
     /// an unexpired commitment lock, or a zero computed payout.
     pub fn claim_investor_payout(env: Env, investor: Address) {
-        ensure(
-            &env,
-            !Self::legal_hold_active(&env),
-            EscrowError::LegalHoldBlocksInvestorClaims,
-        );
+        Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksInvestorClaims);
 
         investor.require_auth();
 
@@ -3406,11 +3402,7 @@ impl LiquifactEscrow {
 
         // env.clone(): env is used again after this call for storage reads, ledger timestamp, and publish.
         let escrow = Self::get_escrow(env.clone());
-        ensure(
-            &env,
-            escrow.status == 2,
-            EscrowError::InvestorClaimNotSettled,
-        );
+        Self::guard_status_eq(&env, escrow.status, 2, EscrowError::InvestorClaimNotSettled);
 
         let not_before: u64 =
             Self::get_persistent_investor_claim_not_before(&env, investor.clone());
@@ -3543,20 +3535,7 @@ impl LiquifactEscrow {
     pub fn update_maturity(env: Env, new_maturity: u64) -> InvoiceEscrow {
         let mut escrow = Self::load_escrow_require_admin(&env);
 
-        ensure(&env, escrow.status == 0, EscrowError::MaturityUpdateNotOpen);
-        /// Guard against no-op updates to prevent misleading events and wasted instance-storage writes.
-        ensure(
-            &env,
-            new_maturity != escrow.maturity,
-            EscrowError::MaturityUnchanged,
-        );
-
-        let max_horizon = env
-            .storage()
-            .instance()
-            .get::<DataKey, u64>(&DataKey::MaturityMaxHorizon)
-            .unwrap_or(DEFAULT_MATURITY_MAX_HORIZON_SECS);
-        validate_maturity_bounds(&env, new_maturity, max_horizon);
+        Self::guard_status_eq(&env, escrow.status, 0, EscrowError::MaturityUpdateNotOpen);
 
         let old_maturity = escrow.maturity;
         escrow.maturity = new_maturity;
@@ -3779,15 +3758,11 @@ impl LiquifactEscrow {
     /// Emits typed [`EscrowError`] codes when legal hold is active, the escrow is uninitialized,
     /// or the escrow is not in status 0 (open).
     pub fn cancel_funding(env: Env) -> InvoiceEscrow {
-        ensure(
-            &env,
-            !Self::legal_hold_active(&env),
-            EscrowError::LegalHoldBlocksCancelFunding,
-        );
+        Self::guard_not_legal_hold(&env, EscrowError::LegalHoldBlocksCancelFunding);
 
         let mut escrow = Self::load_escrow_require_admin(&env);
 
-        ensure(&env, escrow.status == 0, EscrowError::CancelFundingNotOpen);
+        Self::guard_status_eq(&env, escrow.status, 0, EscrowError::CancelFundingNotOpen);
 
         escrow.status = 4;
         env.storage().instance().set(&DataKey::Escrow, &escrow);
@@ -3815,7 +3790,7 @@ impl LiquifactEscrow {
         investor.require_auth();
 
         let escrow = Self::get_escrow(env.clone());
-        ensure(&env, escrow.status == 4, EscrowError::RefundNotCancelled);
+        Self::guard_status_eq(&env, escrow.status, 4, EscrowError::RefundNotCancelled);
 
         let amount: i128 = Self::get_persistent_investor_contribution(&env, investor.clone());
         ensure(&env, amount > 0, EscrowError::NoContributionToRefund);
