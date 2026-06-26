@@ -288,14 +288,12 @@ pub enum EscrowError {
     PrimaryAttestationAlreadyBound = 50,
     /// [`LiquifactEscrow::append_attestation_digest`] exceeded [`MAX_ATTESTATION_APPEND_ENTRIES`].
     AttestationAppendLogCapacityReached = 51,
-
-    /// [`LiquifactEscrow::revoke_attestation_digests`] received an empty indices list.
-    AttestationBatchEmpty = 54,
-    /// [`LiquifactEscrow::revoke_attestation_digests`] exceeded [`MAX_ATTESTATION_REVOKE_BATCH`].
-    AttestationBatchTooLarge = 55,
-
-    /// [`LiquifactEscrow::unrevoke_attestation_digest`] called on an index that is not revoked.
-    AttestationNotRevoked = 56,
+    /// [`LiquifactEscrow::revoke_attestation_digest`] received an `index >= log.len()`.
+    AttestationIndexOutOfRange = 52,
+    /// [`LiquifactEscrow::revoke_attestation_digest`] called on an already-revoked index.
+    AttestationAlreadyRevoked = 53,
+    /// [`LiquifactEscrow::unrevoke_attestation_digest`] called on a non-revoked index.
+    AttestationNotRevoked = 54,
 
     /// [`LiquifactEscrow::record_sme_collateral_commitment`] received a non-positive amount.
     CollateralAmountNotPositive = 60,
