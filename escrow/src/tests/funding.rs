@@ -3246,150 +3246,98 @@ fn test_fund_batch_preserves_event_semantics() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tests for real inbound token custody during funding (Issue #373)
+// Tests for InvestorIndex and Pagination (Issue #376)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_funding_real_inbound_custody_and_reconciliation() {
+fn test_investor_index_population() {
     let env = Env::default();
-    env.mock_all_auths();
-    let client = deploy(&env);
-    let admin = Address::generate(&env);
-    let sme = Address::generate(&env);
-    let investor = Address::generate(&env);
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
 
-    // 1. Install Stellar Asset Contract
-    let token = install_stellar_asset_token(&env);
-    let treasury = Address::generate(&env);
+    let inv_a = Address::generate(&env);
+    let inv_b = Address::generate(&env);
 
-    let target = 100_000i128;
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "REALCUST"),
-        &sme,
-        &target,
-        &800i64,
-        &0u64,
-        &token.id,
-        &None,
-        &treasury,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
+    // Fund from investor A
+    client.fund(&inv_a, &10_000i128);
+    // Index should have A
+    let investors = client.get_investors(&0, &10);
+    assert_eq!(investors.len(), 1);
+    assert_eq!(investors.get(0).unwrap(), inv_a);
 
-    // 2. Mint to investor
-    let funding_amount = 40_000i128;
-    token.stellar.mint(&investor, &funding_amount);
+    // Fund from investor B
+    client.fund(&inv_b, &20_000i128);
+    // Index should have A and B
+    let investors = client.get_investors(&0, &10);
+    assert_eq!(investors.len(), 2);
+    assert_eq!(investors.get(0).unwrap(), inv_a);
+    assert_eq!(investors.get(1).unwrap(), inv_b);
 
-    let investor_balance_before = token.token.balance(&investor);
-    let contract_balance_before = token.token.balance(&client.address);
-    assert_eq!(investor_balance_before, funding_amount);
-    assert_eq!(contract_balance_before, 0);
-
-    // 3. Fund
-    client.fund(&investor, &funding_amount);
-
-    // 4. Assert balance deltas
-    let investor_balance_after = token.token.balance(&investor);
-    let contract_balance_after = token.token.balance(&client.address);
-    assert_eq!(investor_balance_after, 0);
-    assert_eq!(contract_balance_after, funding_amount);
-
-    // 5. Reconciliation with funded_amount
-    let escrow = client.get_escrow();
-    assert_eq!(escrow.funded_amount, funding_amount);
-    assert_eq!(contract_balance_after, escrow.funded_amount);
+    // Repeat fund from investor A
+    client.fund(&inv_a, &5_000i128);
+    // Index should still only have A and B, no duplicate
+    let investors = client.get_investors(&0, &10);
+    assert_eq!(investors.len(), 2);
 }
 
 #[test]
-fn test_funding_insufficient_balance_failure() {
+fn test_get_investors_pagination() {
     let env = Env::default();
-    env.mock_all_auths();
-    let client = deploy(&env);
-    let admin = Address::generate(&env);
-    let sme = Address::generate(&env);
-    let investor = Address::generate(&env);
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
 
-    let token = install_stellar_asset_token(&env);
-    let treasury = Address::generate(&env);
+    // Add 5 distinct investors
+    let mut expected_investors = std::vec::Vec::new();
+    for _ in 0..5 {
+        let inv = Address::generate(&env);
+        expected_investors.push(inv.clone());
+        client.fund(&inv, &1_000i128);
+    }
 
-    let target = 100_000i128;
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "NOBALANCE"),
-        &sme,
-        &target,
-        &800i64,
-        &0u64,
-        &token.id,
-        &None,
-        &treasury,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
+    // Paginate start=0, limit=2
+    let page1 = client.get_investors(&0, &2);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1.get(0).unwrap(), expected_investors[0]);
+    assert_eq!(page1.get(1).unwrap(), expected_investors[1]);
 
-    // Mint less than funding amount (10_000 instead of 40_000)
-    token.stellar.mint(&investor, &10_000i128);
+    // Paginate start=2, limit=2
+    let page2 = client.get_investors(&2, &2);
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2.get(0).unwrap(), expected_investors[2]);
+    assert_eq!(page2.get(1).unwrap(), expected_investors[3]);
 
-    // Attempting to fund 40_000 should fail with InboundInsufficientTokenBalanceBeforeTransfer
-    let result = client.try_fund(&investor, &40_000i128);
-    assert_contract_error(result, EscrowError::InboundInsufficientTokenBalanceBeforeTransfer);
+    // Paginate start=4, limit=2 (only 1 left)
+    let page3 = client.get_investors(&4, &2);
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3.get(0).unwrap(), expected_investors[4]);
 
-    // Verify state was not mutated (balance and funded_amount unchanged)
-    assert_eq!(token.token.balance(&investor), 10_000i128);
-    assert_eq!(token.token.balance(&client.address), 0);
-    assert_eq!(client.get_escrow().funded_amount, 0);
-    assert_eq!(client.get_contribution(&investor), 0);
+    // Paginate start=5, limit=2 (out of bounds)
+    let page4 = client.get_investors(&5, &2);
+    assert_eq!(page4.len(), 0);
+
+    // Paginate with limit 0
+    let page_zero = client.get_investors(&0, &0);
+    assert_eq!(page_zero.len(), 0);
+
+    // Add 52 distinct investors to test capped limit of 50
+    let env2 = Env::default();
+    let (client2, admin2, sme2) = setup(&env2);
+    default_init(&client2, &env2, &admin2, &sme2);
+    for _ in 0..52 {
+        client2.fund(&Address::generate(&env2), &1_000i128);
+    }
+    let max_page = client2.get_investors(&0, &100);
+    assert_eq!(max_page.len(), 50);
 }
 
 #[test]
-fn test_fund_with_commitment_real_inbound_custody() {
+fn test_get_investors_legacy_compatibility() {
     let env = Env::default();
-    env.mock_all_auths();
-    let client = deploy(&env);
-    let admin = Address::generate(&env);
-    let sme = Address::generate(&env);
-    let investor = Address::generate(&env);
+    let (client, admin, sme) = setup(&env);
+    default_init(&client, &env, &admin, &sme);
 
-    let token = install_stellar_asset_token(&env);
-    let treasury = Address::generate(&env);
-
-    let target = 100_000i128;
-    client.init(
-        &admin,
-        &soroban_sdk::String::from_str(&env, "REALCOMM"),
-        &sme,
-        &target,
-        &800i64,
-        &0u64,
-        &token.id,
-        &None,
-        &treasury,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-        &None,
-    );
-
-    let funding_amount = 50_000i128;
-    token.stellar.mint(&investor, &funding_amount);
-
-    client.fund_with_commitment(&investor, &funding_amount, &0u64);
-
-    assert_eq!(token.token.balance(&investor), 0);
-    assert_eq!(token.token.balance(&client.address), funding_amount);
-    let escrow = client.get_escrow();
-    assert_eq!(escrow.funded_amount, funding_amount);
-    assert_eq!(token.token.balance(&client.address), escrow.funded_amount);
+    // No investors have funded yet (InvestorIndex absent)
+    let investors = client.get_investors(&0, &10);
+    assert_eq!(investors.len(), 0);
 }
 

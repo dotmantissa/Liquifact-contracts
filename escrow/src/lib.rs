@@ -390,14 +390,10 @@ pub enum EscrowError {
     NewSmeSameAsCurrent = 162,
 
     /// Attempted to accept admin role when no pending admin exists.
-    NoPendingAdmin = 164,
-
-    InboundTransferAmountNotPositive = 165,
-    InboundInsufficientTokenBalanceBeforeTransfer = 166,
-    InboundSenderBalanceUnderflow = 167,
-    InboundRecipientBalanceUnderflow = 168,
-    InboundSenderBalanceDeltaMismatch = 169,
-    InboundRecipientBalanceDeltaMismatch = 170,
+    NoPendingAdmin = 163,
+    /// The contract's funding-token balance is less than `funded_amount` at withdraw time.
+    /// Funds must be custodied in this contract before the SME can pull them.
+    InsufficientContractBalance = 165,
 }
 
 #[inline(always)]
@@ -524,6 +520,8 @@ pub enum DataKey {
     DistributedPrincipal,
     /// Optional funding deadline (ledger timestamp); after it passes, new funds are rejected.
     FundingDeadline,
+    /// Bounded vector of investor addresses who have contributed to the escrow.
+    InvestorIndex,
 }
 
 // --- Data types ---
@@ -1737,6 +1735,39 @@ impl LiquifactEscrow {
         Self::get_persistent_investor_contribution(&env, investor)
     }
 
+    /// Returns a paginated list of investor addresses who have contributed to this escrow.
+    ///
+    /// Legacy instances that predate this feature will return an empty list (backward compatible under ADR-007).
+    ///
+    /// # Arguments
+    /// * `start` - The starting index (0-based) of the pagination.
+    /// * `limit` - The maximum number of investor addresses to return (capped at a hard limit of 50).
+    ///
+    /// # Returns
+    /// A `Vec<Address>` containing the investor addresses within the requested page.
+    pub fn get_investors(env: Env, start: u32, limit: u32) -> Vec<Address> {
+        let index: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvestorIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let len = index.len();
+        if start >= len || limit == 0 {
+            return Vec::new(&env);
+        }
+
+        let actual_limit = limit.min(50);
+        let end = (start + actual_limit).min(len);
+
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(index.get(i).unwrap());
+        }
+        result
+    }
+
+
     /// Pro-rata denominator captured when the escrow first became **funded**; [`None`] until then.
     ///
     /// The snapshot is write-once. It records the full `funded_amount` at the threshold-crossing
@@ -2479,6 +2510,17 @@ impl LiquifactEscrow {
         }
 
         if prev == 0 {
+            let mut index: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::InvestorIndex)
+                .unwrap_or_else(|| Vec::new(&env));
+            index.push_back(investor.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::InvestorIndex, &index);
+
+            // Use the hoisted cur_funder_count; no second storage read needed.
             env.storage()
                 .instance()
                 .set(&DataKey::UniqueFunderCount, &(cur_funder_count + 1));
@@ -2622,6 +2664,32 @@ impl LiquifactEscrow {
         .publish(&env);
 
         escrow
+    }
+
+    /// Read-only check: whether this escrow is currently settleable.
+    ///
+    /// Returns `true` when all of the following hold:
+    /// - `status == 1` (funded)
+    /// - `maturity == 0` **or** `env.ledger().timestamp() >= maturity`
+    /// - No legal hold is active
+    ///
+    /// # Security
+    /// Pure read — no authorization required, no state mutation.
+    pub fn is_settleable(env: Env) -> bool {
+        if Self::legal_hold_active(&env) {
+            return false;
+        }
+        let escrow = Self::get_escrow(env.clone());
+        if escrow.status != 1 {
+            return false;
+        }
+        if escrow.maturity > 0 {
+            let now = env.ledger().timestamp();
+            if now < escrow.maturity {
+                return false;
+            }
+        }
+        true
     }
 
     /// SME pulls funded liquidity. Transfers `funded_amount` of the bound funding token

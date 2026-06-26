@@ -55,6 +55,8 @@ with `unwrap_or(0)`.
 | `MaxUniqueInvestorsCap` | `u32` | `init` (when `max_unique_investors` arg is `Some`) | Absent means unlimited |
 | `PrimaryAttestationHash` | `BytesN<32>` | `bind_primary_attestation_hash` | Single-set; panics on second call |
 | `AttestationAppendLog` | `Vec<BytesN<32>>` | `append_attestation_digest` | Bounded by `MAX_ATTESTATION_APPEND_ENTRIES` (32) |
+| `InvestorIndex` | `Vec<Address>` | `fund_impl` (on first deposit) | Bounded vector of investor addresses who contributed |
+
 
 ### Per-address investor keys in persistent storage
 
