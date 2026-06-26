@@ -1412,6 +1412,9 @@ impl LiquifactEscrow {
     /// Move up to `amount` (capped by balance and [`MAX_DUST_SWEEP_AMOUNT`]) of the **funding token**
     /// from this contract to [`DataKey::Treasury`].
     ///
+    /// See [`docs/escrow-cancellation-refunds.md`](../../docs/escrow-cancellation-refunds.md)
+    /// for more details on the liability floor, operator guidelines, and worked examples.
+    ///
     /// # Terminal state requirement
     /// Only permitted when [`InvoiceEscrow::status`] is **2 (settled)**, **3 (withdrawn)**, or
     /// **4 (cancelled)**. Open (0) or funded (1) states reject the call so live principal cannot
@@ -3777,6 +3780,9 @@ impl LiquifactEscrow {
     /// Only the [`InvoiceEscrow::admin`] may call this. Blocked while a legal hold is active.
     /// After cancellation, investors may recover their principal via [`LiquifactEscrow::refund`].
     ///
+    /// See [`docs/escrow-cancellation-refunds.md`](../../docs/escrow-cancellation-refunds.md)
+    /// for details on the cancellation lifecycle.
+    ///
     /// # Errors
     /// Emits typed [`EscrowError`] codes when legal hold is active, the escrow is uninitialized,
     /// or the escrow is not in status 0 (open).
@@ -3808,6 +3814,9 @@ impl LiquifactEscrow {
     ///
     /// Requires `investor` auth. Zeroes [`DataKey::InvestorContribution`] after transfer so a
     /// second call fails with [`EscrowError::NoContributionToRefund`].
+    ///
+    /// See [`docs/escrow-cancellation-refunds.md`](../../docs/escrow-cancellation-refunds.md)
+    /// for details on refund mechanics and idempotency safeguards.
     ///
     /// # Errors
     /// Emits typed [`EscrowError`] codes when the escrow is not cancelled, the investor has no
