@@ -313,6 +313,8 @@ pub enum EscrowError {
     AttestationIndexOutOfRange = 52,
     /// [`LiquifactEscrow::revoke_attestation_digest`] called on an already-revoked index.
     AttestationAlreadyRevoked = 53,
+    /// [`LiquifactEscrow::unrevoke_attestation_digest`] called on a non-revoked index.
+    AttestationNotRevoked = 54,
 
     /// [`LiquifactEscrow::record_sme_collateral_commitment`] received a non-positive amount.
     CollateralAmountNotPositive = 60,
