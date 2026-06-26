@@ -146,30 +146,6 @@ use soroban_sdk::{
 };
 
 // ---------------------------------------------------------------------------
-// Storage keys
-// ---------------------------------------------------------------------------
-
-#[contracttype]
-pub enum DataKey {
-    Escrow,
-    SmeCollateralPledge,
-}
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
-#[contracterror]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum EscrowError {
-    NotInitialized = 1,
-    NotOpen = 2,
-    NotFunded = 3,
-    /// Raised by clear_sme_collateral_commitment when no pledge is recorded.
-    NoCollateralToClear = 4,
-}
-
-// ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
 
