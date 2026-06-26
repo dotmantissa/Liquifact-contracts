@@ -169,6 +169,7 @@ liquifact-contracts/
 | `settle` | Mark a funded escrow as settled (SME auth required; maturity enforced). |
 | `withdraw` | SME pulls funded liquidity (accounting record). |
 | `claim_investor_payout` | Investor records a payout claim after settlement. |
+| `claim_payouts_batch` | Batch-record payout claims for up to `MAX_CLAIM_BATCH` investors in one transaction. |
 | `sweep_terminal_dust` | Treasury sweeps rounding residue from a terminal escrow. |
 | `migrate` | Schema version gate — **typed errors on all paths** in the current release (codes 90–92). |
 | `set_legal_hold` | Admin activates/clears compliance hold. |

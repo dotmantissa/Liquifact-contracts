@@ -199,6 +199,10 @@ pub enum EscrowError {
 pub const MAX_INVOICE_AMOUNT: i128 = i128::MAX / 10_000;
 
 
+/// Upper bound on [`LiquifactEscrow::claim_payouts_batch`] entries to keep CPU/storage bounded.
+/// Mirrors [`MAX_INVESTOR_ALLOWLIST_BATCH`] to limit per-call work.
+pub const MAX_CLAIM_BATCH: u32 = 32;
+
 /// Upper bound on [`LiquifactEscrow::fund_batch`] entries to keep storage/CPU bounded.
 /// Mirrors the spirit of `MAX_ATTESTATION_APPEND_ENTRIES` to limit per-call work.
 pub const MAX_FUND_BATCH: u32 = 50;
@@ -423,7 +427,7 @@ pub enum EscrowError {
     /// Computing the legal-hold clear ready-at timestamp would overflow.
     LegalHoldClearDelayOverflow = 152,
     /// Funding deadline has passed, new deposits are rejected.
-    FundingDeadlinePassed = 163,
+    FundingDeadlinePassed = 167,
 
     /// A legal hold blocks rotating the beneficiary (SME) address.
     LegalHoldBlocksBeneficiaryRotation = 160,
@@ -439,7 +443,12 @@ pub enum EscrowError {
     NoPendingAdmin = 81,
     /// The contract's funding-token balance is less than `funded_amount` at withdraw time.
     /// Funds must be custodied in this contract before the SME can pull them.
-    InsufficientContractBalance = 165,
+    InsufficientContractBalance = 164,
+
+    /// [`LiquifactEscrow::claim_payouts_batch`] received an empty batch.
+    ClaimBatchEmpty = 165,
+    /// [`LiquifactEscrow::claim_payouts_batch`] exceeded [`MAX_CLAIM_BATCH`].
+    ClaimBatchTooLarge = 166,
 }
 
 #[inline(always)]
@@ -2322,6 +2331,24 @@ impl LiquifactEscrow {
         Self::get_persistent_investor_claimed(&env, investor)
     }
 
+    /// Returns `true` when [`LiquifactEscrow::settle`] would succeed for the current ledger state.
+    ///
+    /// Specifically: escrow status must be `1` (funded), no legal hold must be active,
+    /// and the configured maturity (if non-zero) must have been reached.
+    pub fn is_settleable(env: Env) -> bool {
+        if Self::legal_hold_active(&env) {
+            return false;
+        }
+        let escrow = Self::get_escrow(env.clone());
+        if escrow.status != 1 {
+            return false;
+        }
+        if escrow.maturity > 0 && env.ledger().timestamp() < escrow.maturity {
+            return false;
+        }
+        true
+    }
+
     /// Record or replace the optional SME collateral commitment metadata.
     ///
     /// **Metadata-only:** this writes [`DataKey::SmeCollateralPledge`] and emits
@@ -3522,26 +3549,76 @@ impl LiquifactEscrow {
         .publish(&env);
     }
 
-    /// Checked coupon math for settlement reporting.
-    fn settlement_coupon(env: &Env, total_principal: i128, yield_bps: i64) -> i128 {
-        total_principal
-            .checked_mul(yield_bps as i128)
-            .unwrap_or_else(|| fail(env, EscrowError::ComputePayoutArithmeticOverflow))
-            .checked_div(10_000)
-            .unwrap_or_else(|| fail(env, EscrowError::ComputePayoutArithmeticOverflow))
-    }
+    /// Batch record payout claims for up to [`MAX_CLAIM_BATCH`] investors in a single transaction.
+    ///
+    /// Applies **identical** per-investor gates as [`LiquifactEscrow::claim_investor_payout`]:
+    /// legal-hold check (once, up front), settled-status gate, `not_before` lock, and idempotency.
+    /// Each investor must individually authorize their own claim via `require_auth()`.
+    ///
+    /// Already-claimed entries are **silently skipped** — they do not abort the batch.
+    /// One `InvestorPayoutClaimed` event is emitted per newly-claimed investor.
+    ///
+    /// # Errors
+    /// - [`EscrowError::LegalHoldBlocksInvestorClaims`] — hold active at call time.
+    /// - [`EscrowError::ClaimBatchEmpty`] — `investors` is empty.
+    /// - [`EscrowError::ClaimBatchTooLarge`] — `investors` exceeds [`MAX_CLAIM_BATCH`].
+    /// - [`EscrowError::InvestorClaimNotSettled`] — escrow not yet settled.
+    /// - Per-investor: [`EscrowError::NoContributionToClaim`], [`EscrowError::InvestorCommitmentLockNotExpired`].
+    pub fn claim_payouts_batch(env: Env, investors: Vec<Address>) {
+        // Legal-hold gate: checked once for the entire batch.
+        ensure(
+            &env,
+            !Self::legal_hold_active(&env),
+            EscrowError::LegalHoldBlocksInvestorClaims,
+        );
 
-    /// Checked investor gross payout arithmetic.
-    fn gross_payout(env: &Env, contribution: i128, total_principal: i128, yield_bps: i64) -> i128 {
-        let coupon = Self::settlement_coupon(env, total_principal, yield_bps);
-        let settle_pool = total_principal
-            .checked_add(coupon)
-            .unwrap_or_else(|| fail(env, EscrowError::ComputePayoutArithmeticOverflow));
-        contribution
-            .checked_mul(settle_pool)
-            .unwrap_or_else(|| fail(env, EscrowError::ComputePayoutArithmeticOverflow))
-            .checked_div(total_principal)
-            .unwrap_or_else(|| fail(env, EscrowError::ComputePayoutArithmeticOverflow))
+        let n = investors.len();
+        ensure(&env, n > 0, EscrowError::ClaimBatchEmpty);
+        ensure(&env, n <= MAX_CLAIM_BATCH, EscrowError::ClaimBatchTooLarge);
+
+        // Settled-status gate: checked once; all investors share the same escrow state.
+        // env.clone(): env is reused for per-investor storage reads and event emission.
+        let escrow = Self::get_escrow(env.clone());
+        ensure(
+            &env,
+            escrow.status == 2,
+            EscrowError::InvestorClaimNotSettled,
+        );
+
+        let now = env.ledger().timestamp();
+
+        for i in 0..n {
+            let investor = investors.get(i).unwrap();
+
+            investor.require_auth();
+
+            let contribution: i128 =
+                Self::get_persistent_investor_contribution(&env, investor.clone());
+            ensure(&env, contribution > 0, EscrowError::NoContributionToClaim);
+
+            let not_before: u64 =
+                Self::get_persistent_investor_claim_not_before(&env, investor.clone());
+            ensure(
+                &env,
+                now >= not_before,
+                EscrowError::InvestorCommitmentLockNotExpired,
+            );
+
+            // Skip already-claimed entries — no error, no re-emit.
+            if Self::get_persistent_investor_claimed(&env, investor.clone()) {
+                continue;
+            }
+
+            // Mark before emit — prevents re-emission on any re-entrant path.
+            Self::set_persistent_investor_claimed(&env, investor.clone(), true);
+
+            InvestorPayoutClaimed {
+                name: symbol_short!("inv_claim"),
+                investor,
+                invoice_id: escrow.invoice_id.clone(),
+            }
+            .publish(&env);
+        }
     }
 
     /// On-chain read-only pro-rata gross payout for `investor`.

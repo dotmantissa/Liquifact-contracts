@@ -137,8 +137,11 @@ See also [`docs/escrow-legal-hold.md`](escrow-legal-hold.md),
 | 160 | `LegalHoldBlocksBeneficiaryRotation` | `rotate_beneficiary` | legal hold active | Clear hold before rotation | typed |
 | 161 | `RotationNotOpen` | `rotate_beneficiary` | status not `0` (open) or `1` (funded) | Rotation only before settlement | typed |
 | 162 | `NewSmeSameAsCurrent` | `rotate_beneficiary` | `new_sme == current sme_address` | Pass a different beneficiary | typed |
-| 163 | `FundingDeadlinePassed` | `fund`, `fund_with_commitment`, `fund_batch` | `funding_deadline` configured and `ledger.timestamp()` past deadline | Funding window closed; do not retry deposits | typed |
-| 164 | `InsufficientContractBalance` | `withdraw` | contract token balance `< funded_amount` at withdraw time | Ensure contract is funded before withdrawal | typed |
+| 163 | `NoPendingAdmin` | `accept_admin` | no pending admin nomination stored | Call `propose_admin` first | typed |
+| 164 | `InsufficientContractBalance` | `withdraw` | contract balance < `funded_amount` at withdraw time | Fund the contract before withdraw | typed |
+| 165 | `ClaimBatchEmpty` | `claim_payouts_batch` | `investors` vec is empty | Pass at least one investor | typed |
+| 166 | `ClaimBatchTooLarge` | `claim_payouts_batch` | `investors` vec exceeds `MAX_CLAIM_BATCH` (32) | Split into smaller batches | typed |
+| 167 | `FundingDeadlinePassed` | `init`, `fund`, `fund_with_commitment`, `fund_batch` | `funding_deadline` configured and `ledger.timestamp()` past deadline | Funding window closed; do not retry deposits | typed |
 
 ### Legacy panic strings (migration aid)
 
