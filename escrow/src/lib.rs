@@ -4039,8 +4039,6 @@ impl LiquifactEscrow {
 
 #[cfg(test)]
 mod test_allowlist_tests;
-#[cfg(test)]
-mod test;
 
 #[cfg(test)]
 mod tests;
