@@ -2,7 +2,30 @@
 
 Soroban escrow for invoice funding, settlement, and investor claims. This README adds **formal invariant stubs** (machine-readable IDs plus math-style properties), **test traceability**, **attestation hashing**, **minimum contribution floors**, and **unique investor caps** (issues #102–#105).
 
-## Remaining Funding Capacity
+## Investor Allowlist Gate
+
+An optional per-address allowlist controls which investors may call `fund` or `fund_with_commitment`.
+
+- **Toggle** (`set_allowlist_active`) — admin-only; stored in instance storage. When `false` (the default), any address may fund regardless of allowlist entries.
+- **Per-address entries** (`set_investor_allowlisted` / `set_investors_allowlisted`) — admin-only; stored in persistent storage with independent TTLs. Absent entries default to **deny** when the gate is active.
+- **Gate enforcement** — checked on every `fund` / `fund_with_commitment` call in `fund_impl`. A prior contribution does **not** exempt an investor: revocation takes effect immediately on the next deposit.
+- **Toggle independence** — disabling the gate does not delete entries; re-enabling it reinstates the same allowlist without any re-configuration.
+
+### Gate behaviour matrix
+
+| Gate active | Entry value | Outcome |
+|-------------|-------------|---------|
+| `false` | any | ✅ Allowed (gate bypassed) |
+| `true` | `true` | ✅ Allowed |
+| `true` | `false` or absent | ❌ `InvestorNotAllowlisted` (error 104) |
+
+### Security invariant: revocation is immediate
+
+Revoking an investor via `set_investor_allowlisted(addr, false)` blocks all subsequent `fund` and `fund_with_commitment` calls from that address, even if they have an existing contribution. The gate re-checks the current allowlist status on every invocation — historical access grants no bypass.
+
+See [`docs/escrow-allowlist.md`](../docs/escrow-allowlist.md) for the full storage model, TTL behavior, and API reference.
+
+
 
 The contract exposes `get_remaining_funding_capacity(env)` to report how much principal can still be accepted before the funding target is met:
 
