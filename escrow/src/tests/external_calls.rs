@@ -227,6 +227,8 @@ fn setup_cancelled_with_token<'a>(
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
     // Mint tokens into the contract to simulate on-chain custody
     token.stellar.mint(&client.address, &fund_amount);
@@ -306,6 +308,8 @@ fn sweep_liability_floor_allows_sweep_of_excess_above_outstanding() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
 
     // Mint 1001 into contract: 500 for A, 500 for B, 1 dust
@@ -353,6 +357,8 @@ fn sweep_liability_floor_blocks_sweep_that_would_eat_into_outstanding() {
         &None,
         &None,
         &None,
+        &None,
+        &None,
     );
 
     token.stellar.mint(&client.address, &1_001i128);
@@ -385,6 +391,8 @@ fn sweep_liability_floor_zero_funded_amount_allows_sweep() {
         &token.id,
         &None,
         &treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -424,6 +432,8 @@ fn distributed_principal_accumulates_across_multiple_refunds() {
         &token.id,
         &None,
         &treasury,
+        &None,
+        &None,
         &None,
         &None,
         &None,
@@ -487,6 +497,7 @@ fn setup_multi_investor_cancelled<'a>(
         &None,
         &None,
         &None,
+        &None,
     );
     token.stellar.mint(&client.address, &total_fund);
     for i in 0..investors.len() {
@@ -507,9 +518,8 @@ fn sweep_liability_floor_refund_then_sweep_sequence() {
     let investors = [a.clone(), b.clone(), c.clone()];
     let amounts = [300i128, 300i128, 300i128];
 
-    let (token, treasury) = setup_multi_investor_cancelled(
-        &env, &client, &admin, &sme, &investors, &amounts,
-    );
+    let (token, treasury) =
+        setup_multi_investor_cancelled(&env, &client, &admin, &sme, &investors, &amounts);
 
     // Mint extra dust
     token.stellar.mint(&client.address, &100i128);
@@ -553,9 +563,8 @@ fn sweep_liability_floor_one_unit_over_fails() {
     let investors = [a.clone(), b.clone()];
     let amounts = [500i128, 500i128];
 
-    let (_token, _treasury) = setup_multi_investor_cancelled(
-        &env, &client, &admin, &sme, &investors, &amounts,
-    );
+    let (_token, _treasury) =
+        setup_multi_investor_cancelled(&env, &client, &admin, &sme, &investors, &amounts);
 
     // Refund one -> distributed=500, outstanding=500, balance=500
     client.refund(&a);
@@ -572,9 +581,8 @@ fn sweep_liability_floor_capped_by_max_dust_sweep() {
     let investors = [a.clone()];
     let amounts = [500i128];
 
-    let (token, treasury) = setup_multi_investor_cancelled(
-        &env, &client, &admin, &sme, &investors, &amounts,
-    );
+    let (token, treasury) =
+        setup_multi_investor_cancelled(&env, &client, &admin, &sme, &investors, &amounts);
 
     // All refunded -> outstanding = 0
     client.refund(&a);
@@ -585,10 +593,7 @@ fn sweep_liability_floor_capped_by_max_dust_sweep() {
 
     let swept = client.sweep_terminal_dust(&huge_dust);
     assert_eq!(swept, MAX_DUST_SWEEP_AMOUNT);
-    assert_eq!(
-        token.token.balance(&treasury),
-        MAX_DUST_SWEEP_AMOUNT
-    );
+    assert_eq!(token.token.balance(&treasury), MAX_DUST_SWEEP_AMOUNT);
 }
 
 #[test]
@@ -628,6 +633,7 @@ fn sweep_liability_floor_terminal_status_guard() {
         &None,
         &None,
         &None,
+        &None,
     );
     client.sweep_terminal_dust(&1i128);
 }
@@ -656,9 +662,8 @@ fn sweep_liability_floor_all_refunded_sweep_all_dust() {
     let investors = [a.clone(), b.clone()];
     let amounts = [400i128, 600i128];
 
-    let (token, treasury) = setup_multi_investor_cancelled(
-        &env, &client, &admin, &sme, &investors, &amounts,
-    );
+    let (token, treasury) =
+        setup_multi_investor_cancelled(&env, &client, &admin, &sme, &investors, &amounts);
 
     client.refund(&a);
     client.refund(&b);
