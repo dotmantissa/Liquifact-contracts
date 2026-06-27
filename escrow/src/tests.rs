@@ -45,6 +45,7 @@ pub(crate) fn assert_contract_error<T, E>(
 // modules stay assertion-focused and each test still owns a fresh Env.
 mod admin;
 mod attestations;
+mod auth_matrix;
 mod cap_validation;
 #[rustfmt::skip]
 mod coverage;
@@ -54,6 +55,7 @@ mod funding;
 mod init;
 mod integration;
 mod legal_hold;
+mod migration_errors;
 mod properties;
 mod settlement;
 

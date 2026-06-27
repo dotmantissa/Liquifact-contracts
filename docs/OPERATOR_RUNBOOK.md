@@ -192,6 +192,139 @@ a bookkeeping step after additive upgrades.
 
 ---
 
+## 2.5. `upgrade()` vs `migrate()`: precise operator guide
+
+### Division of labor
+
+| What changed in the new WASM | Action | Notes |
+|------------------------------|--------|-------|
+| New `DataKey` variants (additive, read with defaults) | `upgrade()` only | No `migrate()` call; old instances return defaults |
+| Bug fix / logic change (no stored type changes) | `upgrade()` only | Storage layout unchanged |
+| Existing `#[contracttype]` struct gained a field | **Redeploy** | Stored XDR cannot be decoded by new WASM |
+| Existing `DataKey` renamed, removed, or reordered | **Redeploy** | XDR discriminant changes corrupt existing state |
+| Storage rewrite is feasible and `migrate()` extended | `upgrade()` then `migrate(stored_version)` | Implement migration branch first |
+
+### Additive-key compatibility rules (ADR-007, Rule 1)
+
+A new `DataKey` variant is safe to deploy in-place (without calling `migrate()`) when:
+
+1. **Read with defaults**: every entrypoint that reads the new key uses
+   `.get(&DataKey::NewVariant).unwrap_or(default)` so pre-existing instances
+   behave as "unset / default" without panicking.
+2. **No struct shape change**: the XDR encoding of every existing stored
+   `#[contracttype]` struct (`InvoiceEscrow`, `FundingCloseSnapshot`,
+   `YieldTier`, `SmeCollateralCommitment`) is unchanged.
+3. **No existing variant changes**: no existing `DataKey` variant is renamed,
+   removed, or reordered.
+
+### DataKey XDR discriminant stability rule (critical)
+
+The `DataKey` enum is serialized to XDR on-chain. In Soroban's `contracttype`
+XDR encoding, **each variant is assigned an integer discriminant equal to its
+position in the enum definition (0-indexed)**. This discriminant is stored
+on-chain as the key identifier.
+
+**Consequence:** if you reorder existing `DataKey` variants, their on-chain
+discriminants change. A storage slot that was previously keyed as discriminant
+5 (`LegalHold`) would become readable only under the new position's integer.
+All existing data keyed under the old discriminant becomes unreachable under the
+new WASM's type system — the contract would silently return defaults or decode
+garbage for those keys.
+
+**Rule: never reorder existing `DataKey` variants. Only append new variants at
+the end of the enum.** This is the "additive-only" guarantee in ADR-007.
+
+Reviewers must verify this rule on every PR that touches `DataKey`. The rule
+applies to both instance and persistent storage keys.
+
+### `migrate()` typed-error branches (current release)
+
+All three branches abort the Soroban transaction with no storage writes:
+
+| Condition | Error | Error code |
+|-----------|-------|-----------|
+| `stored_version != from_version` | `EscrowError::MigrationVersionMismatch` | 90 |
+| `from_version >= SCHEMA_VERSION` | `EscrowError::AlreadyCurrentSchemaVersion` | 91 |
+| `from_version < SCHEMA_VERSION`, no implemented branch | `EscrowError::NoMigrationPath` | 92 |
+
+Execution order within `migrate()`:
+1. `Self::load_escrow_require_admin(&env)` — admin auth gate (always first).
+2. Read `DataKey::Version` from instance storage.
+3. `ensure(stored == from_version)` → `MigrationVersionMismatch` if not equal.
+4. `if from_version >= SCHEMA_VERSION` → `AlreadyCurrentSchemaVersion`.
+5. `else` → `NoMigrationPath` (no implemented migration branch in this release).
+
+**No storage writes occur in any current execution path.** Future extension:
+add the migration logic above step 5, write transformed state, set
+`DataKey::Version` to the new version, and return the new version.
+
+### Step-by-step: additive-only WASM upgrade
+
+Use this path when only new `DataKey` variants are added (no struct changes,
+no variant reordering).
+
+```
+Pre-conditions:
+  - New DataKey variants all use .unwrap_or(default) reads.
+  - No existing DataKey variant was reordered or renamed.
+  - No existing #[contracttype] struct field was added, removed, or changed.
+  - Tests on Testnet pass.
+
+Steps:
+  1. cargo build --target wasm32v1-none --release -p liquifact_escrow
+  2. stellar contract upload --wasm target/.../liquifact_escrow.wasm ...
+     → captures NEW_WASM_HASH
+  3. stellar contract invoke --id <ID> ... -- set_legal_hold --active true
+     (blocks settlements/claims during the swap window)
+  4. stellar contract invoke --id <ID> ... -- upgrade --new_wasm_hash <NEW_WASM_HASH>
+  5. stellar contract invoke --id <ID> ... -- get_version
+     (should still return the same value — upgrade() does not change DataKey::Version)
+  6. stellar contract invoke --id <ID> ... -- get_escrow
+     (verify all fields are intact)
+  7. stellar contract invoke --id <ID> ... -- clear_legal_hold
+  8. Run post-upgrade smoke tests (fund, get_investor_contribution, etc.)
+  *** Do NOT call migrate() — no migration is needed for additive changes. ***
+```
+
+### Step-by-step: schema-breaking upgrade + migrate
+
+Use this path only when an existing stored struct or `DataKey` semantic must
+change AND you have extended `migrate()` with a concrete transformation.
+
+```
+Pre-conditions:
+  - migrate() has been extended with a from_version → new_version branch.
+  - The migration branch reads old data, transforms it, writes new data.
+  - DataKey::Version is written LAST in the migration branch.
+  - SCHEMA_VERSION has been bumped in escrow/src/lib.rs.
+  - cargo test passes with the new migration branch.
+  - Testnet mirror has been upgraded and migrate() called successfully.
+
+Steps:
+  1. cargo build --target wasm32v1-none --release -p liquifact_escrow
+  2. stellar contract upload --wasm target/.../liquifact_escrow.wasm ...
+     → captures NEW_WASM_HASH
+  3. stellar contract invoke --id <ID> ... -- get_version
+     → note STORED_VERSION (e.g., 6)
+  4. stellar contract invoke --id <ID> ... -- set_legal_hold --active true
+  5. stellar contract invoke --id <ID> ... -- upgrade --new_wasm_hash <NEW_WASM_HASH>
+  6. stellar contract invoke --id <ID> ... -- migrate --from_version <STORED_VERSION>
+     (migrate() validates stored == from_version, then applies the transformation)
+  7. stellar contract invoke --id <ID> ... -- get_version
+     (should now return new SCHEMA_VERSION)
+  8. stellar contract invoke --id <ID> ... -- get_escrow
+     (verify all fields are correct under the new schema)
+  9. stellar contract invoke --id <ID> ... -- clear_legal_hold
+  10. Run post-upgrade smoke tests.
+```
+
+> **Warning:** if `migrate()` is called before `upgrade()`, it will run against
+> the old WASM's `SCHEMA_VERSION` constant and will error with
+> `AlreadyCurrentSchemaVersion` (since stored version == old SCHEMA_VERSION ==
+> old WASM's constant). Always upgrade first, then migrate.
+
+---
+
 ## 3. Pre-flight checklist (testnet → mainnet)
 
 Complete all items before promoting to Mainnet.
@@ -302,8 +435,7 @@ stellar contract upload \
   --source $SOURCE_SECRET \
   --network $STELLAR_NETWORK
 
-# Step 2: Invoke the deployed contract's upgrade entrypoint, if present.
-# The current LiquiFact escrow contract does not expose this entrypoint.
+# Step 2: Invoke the deployed contract's upgrade() entrypoint with admin credentials.
 stellar contract invoke \
   --id <EXISTING_CONTRACT_ID> \
   --source $SOURCE_SECRET \
@@ -435,10 +567,10 @@ used as `funding_token` in an escrow instance.
 ### No EVM proxy patterns
 
 This contract does not implement a proxy pattern (no `delegatecall` equivalent
-on Soroban). Same-address upgrade authority should flow through a contract
+on Soroban). Same-address upgrade authority flows through the `upgrade()`
 entrypoint that requires admin authorization before calling
-`env.deployer().update_current_contract_wasm`. The current release does not
-expose that entrypoint, so operators should use redeploy for new WASM.
+`env.deployer().update_current_contract_wasm`. See §4 for the complete
+in-place upgrade procedure.
 
 ### Admin key hygiene
 

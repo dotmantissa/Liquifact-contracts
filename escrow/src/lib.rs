@@ -183,9 +183,6 @@ pub const MAX_INVESTOR_ALLOWLIST_BATCH: u32 = 32;
 /// Caps blast radius if instrumentation mis-estimates “dust”; tune per asset decimals off-chain.
 pub const MAX_DUST_SWEEP_AMOUNT: i128 = 100_000_000;
 
-/// Upper bound on [`LiquifactEscrow::set_investors_allowlisted`] entries to keep storage bounded.
-pub const MAX_INVESTOR_ALLOWLIST_BATCH: u32 = 32;
-
 /// Maximum UTF-8 byte length for the invoice `String` at init (matches Soroban [`Symbol`] max).
 pub const MAX_INVOICE_ID_STRING_LEN: u32 = 32;
 
@@ -819,31 +816,6 @@ pub struct AdminProposalCancelled {
     pub cancelled_pending: Address,
 }
 
-/// Emitted by [`LiquifactEscrow::transfer_admin`] (the deprecated one-step
-/// admin transfer shim) so indexers and operators can flag integrators
-/// still using the legacy single-step path.
-///
-/// This is purely **observability** — handover behavior is unchanged:
-/// the shim still delegates to [`LiquifactEscrow::propose_admin`], which
-/// still emits [`AdminProposedEvent`] as its primary signal. Operators
-/// can aggregate this event over a deployment window to count callers
-/// still using the deprecated entrypoint and drive them to the canonical
-/// `propose_admin` → `accept_admin` two-step flow before `transfer_admin`
-/// is removed.
-///
-/// # Fields
-/// - `name`: hardcoded `adm_can` symbol.
-/// - `invoice_id`: escrow invoice identifier.
-/// - `cancelled_pending`: the address whose nomination was revoked; it can no longer
-///   call [`LiquifactEscrow::accept_admin`].
-#[contractevent]
-pub struct AdminProposalCancelled {
-    #[topic]
-    pub name: Symbol,
-    #[topic]
-    pub invoice_id: Symbol,
-    pub cancelled_pending: Address,
-}
 
 #[contractevent]
 pub struct FundingTargetUpdated {
@@ -1026,6 +998,26 @@ pub struct LegalHoldClearCancelled {
     pub name: Symbol,
     #[topic]
     pub invoice_id: Symbol,
+}
+
+/// Emitted by [`LiquifactEscrow::upgrade`] immediately before the WASM is replaced.
+///
+/// The event is published **before** `env.deployer().update_current_contract_wasm` so that
+/// the record is captured even if the deployer call somehow reverts. Indexers and operators
+/// can correlate this event with the `invoice_id` to audit the upgrade history of a specific
+/// escrow instance.
+///
+/// # Fields
+/// - `name`: hardcoded `"upgrade"` symbol (topic).
+/// - `invoice_id`: the escrow's `invoice_id` (topic, for indexer correlation).
+/// - `new_wasm_hash`: the 32-byte hash of the incoming WASM binary.
+#[contractevent]
+pub struct ContractUpgraded {
+    #[topic]
+    pub name: Symbol,
+    #[topic]
+    pub invoice_id: Symbol,
+    pub new_wasm_hash: BytesN<32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2773,27 +2765,105 @@ impl LiquifactEscrow {
         }
     }
 
-    /// Replaces the deployed contract WASM with the binary identified by `new_wasm_hash`.
+    /// Replaces the deployed WASM bytecode for this contract instance while preserving all
+    /// stored state (instance, persistent, and temporary storage tiers are all unchanged).
     ///
-    /// # Authorization
-    /// Only the current escrow admin may call this function. Authorization is verified
-    /// before any deployer call. Unauthorised callers will cause the transaction to revert.
+    /// This is the **in-place WASM upgrade** path. The contract address, contract ID,
+    /// and all stored ledger entries are preserved. Only the executable code is swapped.
     ///
-    /// # State
-    /// No persistent storage keys, escrow records, or balances are modified.
-    /// Only the contract code is replaced. `SCHEMA_VERSION` is not incremented here;
-    /// run `migrate()` after upgrading if schema changes accompany the new WASM.
+    /// ## Division of labor: `upgrade` vs `migrate`
     ///
-    /// # Interaction with ADR-007
-    /// This function does not add, remove, or rename any `DataKey` variants.
-    /// It is safe to upgrade to a WASM that adds new `DataKey` variants (additive-key
-    /// policy) without calling `migrate()`, but removing or reordering variants in the
-    /// new WASM would corrupt stored data. Operators must verify additive-only changes
-    /// before upgrading.
+    /// | Concern | Function | Notes |
+    /// |---------|----------|-------|
+    /// | Replace running WASM code | `upgrade(new_wasm_hash)` | Admin-gated; preserves all storage |
+    /// | Validate + rewrite stored structs | `migrate(from_version)` | Admin-gated; currently errors on all paths |
+    /// | Additive new `DataKey` | Neither (no call needed) | Old instances default missing keys |
+    /// | Breaking struct/key change | Redeploy | In-place migration only if `migrate` is extended |
     ///
-    /// # Risks
-    /// Deploying an incompatible WASM will corrupt stored state. Test thoroughly on
-    /// testnet before upgrading production contracts.
+    /// ## Authorization
+    ///
+    /// Requires [`InvoiceEscrow::admin`] authorization (`admin.require_auth()`) before any
+    /// deployer interaction. This is enforced via [`Self::load_escrow_require_admin`], which
+    /// reads `DataKey::Escrow` and calls `require_auth()` on `escrow.admin`. Unauthenticated
+    /// callers cause the Soroban transaction to revert before the WASM is touched.
+    ///
+    /// ## State preservation guarantee
+    ///
+    /// After a successful `upgrade` call:
+    /// - **Instance storage**: all keys (including `DataKey::Escrow`, `DataKey::Version`,
+    ///   `DataKey::FundingToken`, `DataKey::LegalHold`, etc.) are unchanged.
+    /// - **Persistent storage**: all per-investor keys (`DataKey::InvestorContribution(addr)`,
+    ///   `DataKey::InvestorEffectiveYield(addr)`, `DataKey::InvestorClaimNotBefore(addr)`,
+    ///   `DataKey::InvestorClaimed(addr)`, `DataKey::InvestorAllowlisted(addr)`) are unchanged.
+    /// - **SCHEMA_VERSION** (compile-time constant in new WASM) is updated, but
+    ///   `DataKey::Version` (on-chain stored value) is **not** changed by this call.
+    ///   A mismatch between them after upgrade is the signal that `migrate()` may be needed.
+    /// - **Token balances** are not transferred. The escrow's custody balance is unaffected.
+    ///
+    /// ## Additive-key safety contract (ADR-007, Rule 1)
+    ///
+    /// A WASM upgrade is safe when the new WASM only **adds** new `DataKey` variants that:
+    /// 1. Are read with `.get(...).unwrap_or(default)` so pre-existing instances return
+    ///    the expected default when the key is absent.
+    /// 2. Do not change the XDR shape of any existing stored `#[contracttype]` struct
+    ///    (e.g. `InvoiceEscrow`, `FundingCloseSnapshot`, `YieldTier`, `SmeCollateralCommitment`).
+    /// 3. Do not rename or remove any existing `DataKey` variant.
+    ///
+    /// **Critically: `DataKey` variant ordering in the enum determines the XDR discriminant
+    /// (encoded as an integer). Reordering existing variants changes their on-chain discriminant,
+    /// causing reads of those keys to silently decode the wrong storage slot or return nothing.
+    /// Never reorder existing `DataKey` variants; only append new ones at the end of the enum.**
+    ///
+    /// A WASM upgrade is **unsafe / breaking** when:
+    /// - An existing `DataKey` variant is renamed, removed, or reordered.
+    /// - An existing stored `#[contracttype]` struct gains a non-optional field.
+    /// - An existing stored `#[contracttype]` struct changes a field type.
+    /// - The XDR discriminant of any existing variant changes (caused by reordering).
+    ///
+    /// These breaking changes require either a `migrate` path (extend `migrate` first,
+    /// then upgrade, then call `migrate`) or a full redeploy. See `docs/OPERATOR_RUNBOOK.md` §1
+    /// and `docs/adr/ADR-007-storage-key-evolution.md` for the decision tree.
+    ///
+    /// ## Event emission (before deployer call)
+    ///
+    /// A [`ContractUpgraded`] event is emitted *before* the deployer call as a defensive
+    /// ordering: the event is recorded even if the deployer interaction somehow reverts.
+    /// The event carries `invoice_id` (for indexer correlation) and `new_wasm_hash`.
+    ///
+    /// ## When to call `migrate` after upgrading
+    ///
+    /// - **Additive-only new `DataKey` variants**: do **not** call `migrate()`. Old instances
+    ///   return defaults for absent keys; no rewrite is needed.
+    /// - **Schema-breaking changes where `migrate()` has been extended**: call `migrate(stored_version)`
+    ///   after the upgrade. The stored version before upgrade is readable via `get_version()`.
+    /// - **Current release (SCHEMA_VERSION = 6)**: `migrate()` errors on all paths.
+    ///   Do not call it as a bookkeeping step after an additive upgrade.
+    ///
+    /// ## Operator pre-flight checklist
+    ///
+    /// Before invoking `upgrade` on a live instance, operators must:
+    /// 1. Activate a legal hold (`set_legal_hold(true)`) to block in-flight settlements/claims.
+    /// 2. Build and upload the new WASM: `cargo build --target wasm32v1-none --release`.
+    /// 3. Upload to the network: `stellar contract upload --wasm ...` → captures `NEW_WASM_HASH`.
+    /// 4. Diff the new `DataKey` enum against the deployed version: verify only additive changes.
+    /// 5. Test on Testnet with a mirror instance before Mainnet.
+    /// 6. Call `upgrade(NEW_WASM_HASH)` with admin credentials.
+    /// 7. Verify `get_version()` and `get_escrow()` return expected values.
+    /// 8. Clear legal hold: `clear_legal_hold()`.
+    /// See `docs/OPERATOR_RUNBOOK.md` §§3–7 for the complete procedure.
+    ///
+    /// ## Rollback
+    ///
+    /// Re-upload the previous WASM (already recorded on-chain) and call `upgrade(PREV_WASM_HASH)`.
+    /// This works only when stored data is still compatible with old WASM types. If stored data
+    /// was already rewritten by a `migrate` call, rollback requires a redeploy.
+    ///
+    /// ## Risks
+    ///
+    /// Deploying an incompatible WASM (one that reorders or removes existing `DataKey` variants,
+    /// or changes a stored struct's XDR shape) will silently corrupt stored state on the next read.
+    /// There is no on-chain undo once `update_current_contract_wasm` completes. Test thoroughly
+    /// on Testnet before upgrading production contracts.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         // Auth first — matches migrate() ordering
         let escrow = Self::load_escrow_require_admin(&env);
