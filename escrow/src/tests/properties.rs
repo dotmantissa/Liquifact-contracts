@@ -1535,8 +1535,6 @@ fn cancelled_escrow<'a>(
         &None,
         &None,
         &None,
-        &None,
-        &None,
     );
     for (investor, amount) in contributions {
         client.fund(investor, amount);
